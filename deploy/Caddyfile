@@ -1,0 +1,44 @@
+# Geometría en el servidor 24/7: https://10.8.0.20:4380, solo por la VPN.
+# Certificado de 10.8.0.20 firmado por la CA de casa (el mismo que el del taller y BeatReel).
+# HTTPS para que el navegador trate la página como "segura" (WebAssembly, descargas, etc.).
+{
+	auto_https off
+	admin off
+	servers {
+		protocols h1 h2
+	}
+}
+
+:4380 {
+	tls /certs/geometria.crt /certs/geometria.key
+	root * /srv
+	file_server
+	encode zstd gzip
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# Política de contenido (CSP). La página: solo scripts propios y WebAssembly, nada en línea.
+	# El motor (cad.worker) necesita además 'unsafe-eval' porque OpenCascade genera funciones al
+	# arrancar; como corre en un trabajador aparte, ese permiso no llega a la página.
+	@worker path /assets/cad.worker-*.js
+	@page not path /assets/cad.worker-*.js
+	header @page Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	header @worker Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; object-src 'none'"
+
+	# Los ficheros de assets/ llevan una huella en el nombre: se pueden guardar mucho tiempo
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+}
+
+# Solo para el healthcheck de Docker, dentro del contenedor (no se publica).
+http://:8081 {
+	bind 127.0.0.1
+	respond "ok" 200
+}

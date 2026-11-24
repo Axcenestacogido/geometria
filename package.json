@@ -1,0 +1,35 @@
+{
+  "name": "geometria",
+  "version": "1.0.0",
+  "description": "Geometría: CAD 3D paramétrico en el navegador para diseñar piezas e imprimirlas",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Axcenestacogido/geometria.git"
+  },
+  "keywords": [],
+  "author": "Jose Manuel",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/Axcenestacogido/geometria/issues"
+  },
+  "homepage": "https://github.com/Axcenestacogido/geometria#readme",
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "replicad": "^1.2.1",
+    "replicad-opencascadejs": "^1.2.1",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "private": true,
+  "type": "module"
+}
