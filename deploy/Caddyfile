@@ -12,7 +12,16 @@
 :4380 {
 	tls /certs/geometria.crt /certs/geometria.key
 	root * /srv
-	file_server
+	# Las piezas guardadas: a geometria-datos, por la red interna de Docker (no tiene puertos propios)
+	handle /api/* {
+		request_body {
+			max_size 26MB
+		}
+		reverse_proxy geometria-datos:8090
+	}
+	handle {
+		file_server
+	}
 	encode zstd gzip
 	header {
 		X-Content-Type-Options "nosniff"

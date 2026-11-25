@@ -4,9 +4,9 @@ CAD 3D paramétrico que funciona en el navegador, para diseñar piezas y mandarl
 impresora 3D. Dibujas un boceto con medidas, lo conviertes en sólido y cada paso queda
 guardado en una lista: si cambias una medida, toda la pieza se recalcula.
 
-Todo se calcula **en tu navegador**. El servidor solo entrega la página: no hay base de datos
-ni subidas. Las piezas se guardan en el navegador del equipo donde trabajas (y puedes
-descargarlas como `.json` para pasarlas a otro).
+Todo se calcula **en tu navegador**. Las piezas se guardan en el navegador y también en el
+servidor (`geometria-datos`), así que las ves en todos tus equipos y entran en la copia de
+cada noche. Sin conexión se sigue trabajando: lo pendiente se sube al volver.
 
 ## Qué hace
 
@@ -111,6 +111,8 @@ En los campos de medida, las flechas ↑ ↓ suman o restan 1 (con `Mayús`, 10)
 | `src/sketcher.ts` | El editor de bocetos 2D |
 | `src/viewport.ts` | La vista 3D y la selección de aristas y caras |
 | `src/threemf.ts` | Escritor de 3MF |
+| `src/cloud.ts` | Subir y bajar piezas del servidor (revisiones, choques entre equipos, sin conexión) |
+| `server/index.mjs` | `geometria-datos`: guarda las piezas en `datos/` (Node puro, sin dependencias) |
 | `src/main.ts` | La pantalla y cómo encaja todo |
 
 ## Trabajar en local
@@ -143,9 +145,25 @@ En Uptime Kuma: monitor HTTP(s) `Geometría · por VPN (servidor)`, URL
 
 ### Actualizar
 
+Lo hace el hub solo al fusionar en `main`. A mano sería:
+
 ```bash
 cd /srv/apps/geometria && git pull --ff-only && docker compose up -d --build
 ```
+
+### Piezas guardadas en el servidor
+
+`geometria-datos` guarda en `/srv/apps/geometria/datos` (`piezas/` un JSON por pieza,
+`archivos/` los STEP/STL/imágenes importados, `papelera/` lo borrado, 30 días). La copia de
+cada noche ya incluye todo `/srv`. Si la barra de abajo dice siempre «Sin conexión» y el
+registro de `geometria-datos` dice que no puede escribir:
+
+```bash
+sudo chown -R 1000:1000 /srv/apps/geometria/datos && docker compose restart geometria-datos
+```
+
+Choques: cada pieza lleva un número de revisión. Si dos equipos cambian la misma pieza, el
+segundo no pisa al primero: lo suyo se guarda como «… (copia de este equipo)».
 
 ### Seguridad
 
@@ -153,4 +171,7 @@ cd /srv/apps/geometria && git pull --ff-only && docker compose up -d --build
   `connect-src 'self'` (la página no puede hablar con ningún otro sitio).
 - El motor (`cad.worker`) tiene además `'unsafe-eval'`, porque OpenCascade crea funciones al
   arrancar. Ese permiso va solo en la respuesta del *worker*, no en la página.
-- Sin estado en el servidor: no hay nada que copiar por la noche.
+- `geometria-datos` no tiene puertos ni internet: está solo en una red interna de Docker con
+  Caddy, que le pasa `/api/`. Usuario 1000, disco de solo lectura salvo `datos/`, sin
+  capacidades, 64 MB y media CPU. Nombres de pieza y archivo solo con letras, números, `-` y
+  `_`; 25 MB por petición y 2 GB en total.

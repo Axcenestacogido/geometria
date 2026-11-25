@@ -1,3 +1,7 @@
 node_modules
 dist
 certs
+
+# piezas guardadas en el servidor (van en la copia, no en git)
+datos/*
+!datos/.gitkeep

@@ -21,6 +21,7 @@ import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
 import { edgeShapes } from "./edgeloops";
 import { Dxf, addSvgPaths } from "./dxf";
+import { cloud, docFileIds, type CloudStatus } from "./cloud";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
   FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, myFit, setMyFit, type ResolveOut,
@@ -157,7 +158,7 @@ $("#app").innerHTML = `
   <button data-sheet="props"><i>✎</i><span id="dock-props">Tu pieza</span></button>
   <button data-sheet="vars"><i>𝑥</i><span>Variables</span></button>
 </nav>
-<footer class="status"><span id="st-engine">Motor: cargando</span><span id="st-msg"></span><span class="spacer"></span><span>Unidades: mm</span></footer>
+<footer class="status"><span id="st-engine">Motor: cargando</span><span id="st-msg"></span><span class="spacer"></span><span id="st-cloud"></span><span>Unidades: mm</span></footer>
 <dialog id="dlg"></dialog>
 <input type="file" id="file" accept=".json,application/json" hidden />
 <input type="file" id="file3d" accept=".step,.stp,.stl" hidden />
@@ -307,6 +308,12 @@ function rebuild() {
 // Cambios, deshacer y guardado
 // ======================================================================
 
+/** Guarda en el navegador y, si hay servidor, deja la pieza lista para subirse */
+function saveDoc(id: string, d: Doc) {
+  storage.save(id, d);
+  cloud.saved(id);
+}
+
 let saveTimer = 0;
 function changed(commit = true, structural = false) {
   rebuild();
@@ -314,7 +321,7 @@ function changed(commit = true, structural = false) {
   if (commit) {
     history.push(JSON.stringify(doc));
     clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => { storage.save(docId, doc); autoVersion(); }, 300);
+    saveTimer = window.setTimeout(() => { saveDoc(docId, doc); autoVersion(); }, 300);
     renderUndo();
   }
   const af = doc.features.find((f) => f.id === active);
@@ -358,7 +365,7 @@ function setDoc(d: Doc, id = docId, resetHistory = true) {
   $("#sketch").classList.remove("on");
   document.body.classList.remove("sketching");
   if (resetHistory) history.reset(JSON.stringify(doc));
-  storage.save(docId, doc);
+  saveDoc(docId, doc);
   viewport.refit();
   renderAll();
   rebuild();
@@ -370,7 +377,7 @@ function undoRedo(which: "undo" | "redo") {
   doc = JSON.parse(s);
   resolved = resolveDoc(doc);
   if (active && !doc.features.some((f) => f.id === active)) active = null;
-  storage.save(docId, doc);
+  saveDoc(docId, doc);
   renderAll();
   rebuild();
 }
@@ -3031,6 +3038,7 @@ function openDialog() {
   const dlg = $("#dlg") as HTMLDialogElement;
   dlg.innerHTML = "";
   // la abierta, con su miniatura al día
+  // (solo en el navegador: la pieza de ejemplo de un equipo nuevo no tiene por qué ir al servidor)
   if (!storage.list().some((m) => m.id === docId)) storage.save(docId, doc);
   if (lastBuildFull) { const u = viewport.thumbnail(); if (u) storage.setThumb(docId, u); }
   const list = storage.list();
@@ -3056,20 +3064,34 @@ function openDialog() {
             const d = storage.load(m.id); if (!d) return;
             d.name += " (copia)";
             const nid = uid();
-            storage.save(nid, d);
+            saveDoc(nid, d);
             if (url) storage.setThumb(nid, url);
-            if (m.id !== docId) storage.save(docId, doc); // que la abierta siga siendo la última
+            if (m.id !== docId) saveDoc(docId, doc); // que la abierta siga siendo la última
             openDialog();
             toast("Copia creada");
           } }, "Duplicar"),
-          m.id === docId ? null : twoClick("Borrar", "¿Seguro? Borrar", () => { storage.remove(m.id); openDialog(); }),
+          m.id === docId ? null : twoClick("Borrar", "¿Seguro? Borrar", () => { storage.remove(m.id); cloud.remove(m.id); openDialog(); }),
         ),
       ));
     }
   };
   search.addEventListener("input", fill);
   fill();
-  dlg.append(h("h2", {}, "Mis piezas"), h("p", { class: "empty" }, "Guardadas en este navegador. Para pasarlas a otro equipo: Archivo → Descargar proyecto."), search, grid,
+  const only = cloud.localOnly().length;
+  const where = cloud.status === "none"
+    ? h("p", { class: "empty" }, "Guardadas en este navegador. Para pasarlas a otro equipo: Archivo → Descargar proyecto.")
+    : h("p", { class: "empty" }, cloud.status === "offline"
+      ? "Sin conexión con el servidor: lo que cambies se guarda aquí y se sube al volver."
+      : "Guardadas en el servidor: las ves igual en todos tus equipos y entran en la copia de cada noche.");
+  const up = only && cloud.status !== "none"
+    ? h("div", { class: "msg info cloud-up" }, `${only === 1 ? "Hay 1 pieza" : `Hay ${only} piezas`} solo en este navegador.`,
+        h("button", { class: "btn small primary", onclick: async () => {
+          const n = await cloud.uploadLocal();
+          toast(cloud.status === "on" ? `${n === 1 ? "1 pieza subida" : `${n} piezas subidas`} al servidor` : "Sin conexión: se subirán al volver");
+          openDialog();
+        } }, "Subirlas al servidor"))
+    : null;
+  dlg.append(...[h("h2", {}, "Mis piezas"), where, up, search, grid].filter((x): x is HTMLElement => !!x),
     h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
   if (!dlg.open) dlg.showModal();
 }
@@ -3119,7 +3141,7 @@ function historyDialog() {
         active = null;
         sketcher.close();
         history.push(JSON.stringify(doc));
-        storage.save(docId, doc);
+        saveDoc(docId, doc);
         renderAll();
         rebuild();
         dlg.close();
@@ -3142,9 +3164,8 @@ function historyDialog() {
 /** Descarga el proyecto; los archivos importados van dentro para poder abrirlo en otro equipo */
 async function saveProjectFile() {
   const out: Doc = JSON.parse(JSON.stringify(doc));
-  for (const f of doc.features) {
-    const fid = f.type === "import" || f.type === "relief" ? f.file : f.type === "sketch" ? f.image?.file : undefined;
-    if (!fid || out.files?.[fid]) continue;
+  for (const fid of docFileIds(doc)) {
+    if (out.files?.[fid]) continue;
     const st = await files.get(fid);
     if (st) (out.files ??= {})[fid] = { name: st.name, format: st.format, data: toBase64(st.data) };
   }
@@ -3393,3 +3414,39 @@ renderAll();
 rebuild();
 // para depurar desde la consola
 (window as unknown as Record<string, unknown>).geometria = { get doc() { return doc; }, get build() { return build; }, setDoc, viewport };
+
+// ---------- guardado en el servidor ----------
+function renderCloud(s: CloudStatus, pending: number) {
+  const el = $("#st-cloud");
+  el.className = `cloud ${s}`;
+  el.textContent = s === "none" ? "" : s === "checking" ? "☁ …" : s === "offline" ? `☁ Sin conexión${pending ? ": se subirá al volver" : ""}` : pending ? "☁ Subiendo…" : "☁ Guardado en el servidor";
+  el.title = s === "offline" ? "No llego al servidor. Todo se sigue guardando en este navegador." : s === "on" ? "Tus piezas están en el servidor: las ves en todos tus equipos." : "";
+}
+cloud.hooks = {
+  onStatus: renderCloud,
+  onConflict: (id, copyId) => {
+    if (id !== docId) return;
+    const d = storage.load(copyId);
+    if (d) setDoc(d, copyId, false);
+    toast(`Otro equipo había cambiado «${storage.load(id)?.name ?? "esta pieza"}». Lo tuyo sigue aquí como «${d?.name}»; la otra está en Mis piezas.`);
+  },
+  onPulled: (ids) => {
+    if (ids.includes(docId)) {
+      const d = storage.load(docId);
+      if (!d) {
+        // la borraron en otro equipo: aquí sigue abierta, y se vuelve a guardar
+        saveDoc(docId, doc);
+        toast("Esta pieza se borró en otro equipo. Aquí sigue abierta y se ha vuelto a guardar.");
+      } else if (JSON.stringify(d) !== JSON.stringify(doc) && !active) {
+        setDoc(d, docId);
+        toast("Pieza puesta al día con los cambios de otro equipo");
+      }
+    }
+    const dlg = $("#dlg") as HTMLDialogElement;
+    if (dlg.open && dlg.querySelector(".gallery")) openDialog();
+  },
+};
+void cloud.init().then(() => {
+  const n = cloud.localOnly().length;
+  if (cloud.status === "on" && n) toast(`${n === 1 ? "Tienes 1 pieza" : `Tienes ${n} piezas`} solo en este navegador`, { label: "Subirlas", run: async () => { const k = await cloud.uploadLocal(); toast(`${k === 1 ? "1 pieza subida" : `${k} piezas subidas`} al servidor`); } });
+});
