@@ -19,7 +19,7 @@ descargarlas como `.json` para pasarlas a otro).
 | **Sumar / Restar / Intersecar** | Cada sólido puede crear un cuerpo nuevo o combinarse con uno existente. Al restar desde una cara, va hacia dentro de la pieza. |
 | **Redondeo y Chaflán** | Eliges las aristas con un clic en la vista 3D. |
 | **Vaciado** | Convierte el sólido en una carcasa; eliges con un clic las caras que quedan abiertas. |
-| **Patrón** | Repite un paso en fila, rejilla o círculo, o lo refleja (simetría). |
+| **Patrón** | Repite un paso en fila, rejilla, círculo o a lo largo de un camino (girando con él si quieres), o lo refleja (simetría). |
 | **Agujeros** | Tornillería métrica M2–M20: de paso, avellanado, con caja, para inserto térmico, directo al plástico, hueco para tuerca y rosca hembra. Con holgura para la impresora. |
 | **Varilla roscada** | Rosca macho que sale de una cara. |
 | **Barrido** | Un perfil que recorre un camino (tubos, asas, aros). El camino se dibuja con la herramienta *Camino*. |
@@ -34,6 +34,10 @@ descargarlas como `.json` para pasarlas a otro).
 | **Comprobar para imprimir** | En «Tu pieza»: si cabe en la cama, voladizos de más de 45° (en rojo) y paredes finas (en morado). La cama y los límites se ajustan. |
 | **Plantillas** | Caja con tapa a presión, bisagra imprimible ya montada y tornillo con tuerca M10, todas con variables y holguras. |
 | **Pieza** | Mete dentro una de tus piezas guardadas (copia), cambiando sus variables, posición y giro. |
+| **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
+| **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
+| **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
+| **Móvil** | Funciona en el móvil: la vista se queda arriba, el boceto se mueve y se amplía con dos dedos, y los puntos son más grandes para el dedo. |
 | **Medir** | Distancia entre vértices, aristas o caras, con X, Y, Z por separado. |
 | **Tu pieza** | Tamaño, volumen, peso en PLA/PETG y metros de filamento. |
 | **Variables** | `grosor = 3` y luego escribes `grosor * 2` en cualquier medida. Admite `+ - * / ^ ( )`, `sqrt`, `sin`, `cos`, `tan` (en grados), `abs`, `round` y `pi`. |

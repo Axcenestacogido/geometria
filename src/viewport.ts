@@ -60,10 +60,16 @@ export class Viewport {
   events: ViewportEvents = {};
   private needsFit = true;
   private down: { x: number; y: number } | null = null;
+  /** el último toque fue con el dedo: se elige con más margen */
+  private touch = false;
+  /** plano de corte (null = sin corte) */
+  private section: THREE.Plane | null = null;
+  private colors: Record<string, string> = {};
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.localClippingEnabled = true;
     host.appendChild(this.renderer.domElement);
     this.persp = new THREE.PerspectiveCamera(40, 1, 0.1, 100000);
     this.ortho = new THREE.OrthographicCamera(-50, 50, 50, -50, -100000, 100000);
@@ -86,12 +92,12 @@ export class Viewport {
     this.resize();
 
     const el = this.renderer.domElement;
-    el.addEventListener("pointerdown", (e) => (this.down = { x: e.clientX, y: e.clientY }));
+    el.addEventListener("pointerdown", (e) => { this.down = { x: e.clientX, y: e.clientY }; this.touch = e.pointerType === "touch"; });
     el.addEventListener("pointerup", (e) => {
       if (!this.down) return;
       const moved = Math.hypot(e.clientX - this.down.x, e.clientY - this.down.y);
       this.down = null;
-      if (moved < 5 && e.button === 0) this.click(e);
+      if (moved < (this.touch ? 12 : 5) && e.button === 0) this.click(e);
     });
     el.addEventListener("pointermove", (e) => this.hover(e));
 
@@ -176,7 +182,36 @@ export class Viewport {
     this.controls.update();
   }
 
-  setBodies(bodies: BodyMesh[]) {
+  private clip() { return this.section ? [this.section] : []; }
+
+  /**
+   * Corte: esconde lo que queda a un lado de un plano perpendicular a X, Y o Z.
+   * `at` va de 0 a 1 dentro de la caja de la pieza. Por dentro se ve en otro color (la "tapa").
+   */
+  setSection(s: { axis: 0 | 1 | 2; at: number; flip: boolean } | null) {
+    if (!s) this.section = null;
+    else {
+      const box = new THREE.Box3().setFromObject(this.bodiesGroup);
+      const lo = box.isEmpty() ? -50 : box.min.getComponent(s.axis), hi = box.isEmpty() ? 50 : box.max.getComponent(s.axis);
+      const pos = lo + (hi - lo) * s.at;
+      const n = new THREE.Vector3(); n.setComponent(s.axis, s.flip ? 1 : -1);
+      // se ve lo que cumple n·p + c >= 0
+      this.section = new THREE.Plane(n, s.flip ? -pos : pos);
+    }
+    this.applyClip();
+  }
+
+  private applyClip() {
+    const planes = this.clip();
+    for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup]) g.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m) { m.clippingPlanes = planes; m.needsUpdate = true; }
+      if (o.userData.cap) o.visible = !!this.section;
+    });
+  }
+
+  setBodies(bodies: BodyMesh[], colors: Record<string, string> = this.colors) {
+    this.colors = colors;
     for (const c of [...this.bodiesGroup.children]) {
       this.bodiesGroup.remove(c);
       c.traverse((o) => {
@@ -195,7 +230,7 @@ export class Viewport {
       g.setAttribute("normal", new THREE.BufferAttribute(b.normals, 3));
       g.setIndex(new THREE.BufferAttribute(b.triangles, 1));
       const mat = new THREE.MeshStandardMaterial({
-        color: bodyColor, metalness: 0.05, roughness: 0.55,
+        color: colors[b.id] ? new THREE.Color(colors[b.id]) : bodyColor, metalness: 0.05, roughness: 0.55,
         polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
       });
       const mesh = new THREE.Mesh(g, mat);
@@ -204,8 +239,15 @@ export class Viewport {
       lg.setAttribute("position", new THREE.BufferAttribute(b.lines, 3));
       const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: edgeColor }));
       this.edgeObjects.push({ line: lines, pts: b.lines, groups: b.edgeGroups });
-      this.bodiesGroup.add(mesh, lines);
+      // la "tapa" del corte: las caras de dentro, en color plano
+      // (más oscura que el cuerpo, para que se distinga del resto)
+      const capColor = (colors[b.id] ? new THREE.Color(colors[b.id]) : new THREE.Color(css("--cap"))).multiplyScalar(colors[b.id] ? 0.55 : 1);
+      const cap = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: capColor, side: THREE.BackSide }));
+      cap.userData.cap = true;
+      cap.userData.body = b.id;
+      this.bodiesGroup.add(mesh, lines, cap);
     }
+    this.applyClip();
     if (this.needsFit && bodies.length) {
       this.needsFit = false;
       this.fit();
@@ -225,6 +267,7 @@ export class Viewport {
         polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
       })));
     }
+    this.applyClip();
     const [x, y, z] = c.bed;
     const box = new THREE.Box3(new THREE.Vector3(-x / 2, -y / 2, 0), new THREE.Vector3(x / 2, y / 2, z));
     this.checkGroup.add(new THREE.Box3Helper(box, new THREE.Color(css("--muted"))));
@@ -403,13 +446,13 @@ export class Viewport {
     const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
     const rc = new THREE.Raycaster();
     rc.setFromCamera(v, this.camera);
-    rc.params.Line = { threshold: this.worldPerPixel() * 6 };
+    rc.params.Line = { threshold: this.worldPerPixel() * (this.touch ? 16 : 6) };
     return rc;
   }
 
   private pickEdge(e: PointerEvent): THREE.Vector3 | null {
     const rc = this.ray(e);
-    const hits = rc.intersectObjects(this.edgeObjects.map((o) => o.line), false);
+    const hits = rc.intersectObjects(this.edgeObjects.map((o) => o.line), false).filter((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hits.length) return null;
     // proyectar el punto exactamente sobre el segmento tocado
     const h = hits[0];
@@ -423,8 +466,9 @@ export class Viewport {
 
   private pickFace(e: PointerEvent) {
     const rc = this.ray(e);
-    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh);
-    const hit = rc.intersectObjects(meshes, false)[0];
+    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap);
+    // con corte, lo que está al otro lado del plano no se puede tocar
+    const hit = rc.intersectObjects(meshes, false).find((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hit || !hit.face) return null;
     return { point: hit.point, normal: hit.face.normal.clone() };
   }
