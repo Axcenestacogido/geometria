@@ -14,7 +14,12 @@ export interface ViewportEvents {
   onEdgePick?: (point: Vec3) => void;
   onFacePick?: (point: Vec3, normal: Vec3) => void;
   onMeasure?: (points: Vec3[]) => void;
+  /** clic sin herramienta: el cuerpo que hay debajo (o null si es el vacío) */
+  onBodyClick?: (id: string | null) => void;
 }
+
+/** Lo que se ha movido con las flechas: mm y grados (un solo eje de giro por arrastre) */
+export interface GizmoDelta { dx: number; dy: number; dz: number; rx: number; ry: number; rz: number }
 
 export interface Marks {
   edges?: Vec3[];
@@ -73,7 +78,7 @@ export class Viewport {
   private gizmo: TransformControls | null = null;
   private gizmoObj = new THREE.Object3D();
   private gizmoBody = "";
-  private gizmoDone: ((d: { dx: number; dy: number; dz: number; rz: number }) => void) | null = null;
+  private gizmoDone: ((d: GizmoDelta) => void) | null = null;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -330,7 +335,7 @@ export class Viewport {
    * Flechas sobre un cuerpo: al soltar, avisa de cuánto se movió (mm) y giró en Z (grados).
    * Mientras arrastras, el cuerpo se mueve en la vista (la pieza de verdad se recalcula al soltar).
    */
-  setGizmo(g: { body: string; center: Vec3; mode: "translate" | "rotate"; onDone: (d: { dx: number; dy: number; dz: number; rz: number }) => void } | null) {
+  setGizmo(g: { body: string; center: Vec3; mode: "translate" | "rotate"; onDone: (d: GizmoDelta) => void } | null) {
     if (!g) {
       if (this.gizmo) { this.scene.remove(this.gizmo.getHelper()); this.gizmo.detach(); this.gizmo.dispose(); this.gizmo = null; }
       this.gizmoDone = null;
@@ -351,7 +356,10 @@ export class Viewport {
     const tc = this.gizmo;
     tc.camera = this.camera;
     tc.setMode(g.mode);
-    tc.showX = g.mode === "translate"; tc.showY = g.mode === "translate"; tc.showZ = true;
+    tc.showX = true; tc.showY = true; tc.showZ = true;
+    // pasos limpios: medio milímetro y 5 grados
+    tc.setTranslationSnap(0.5);
+    tc.setRotationSnap(THREE.MathUtils.degToRad(5));
     tc.size = this.touch || matchMedia("(pointer: coarse)").matches ? 1.4 : 1;
     this.gizmoBody = g.body;
     this.gizmoDone = g.onDone;
@@ -379,8 +387,10 @@ export class Viewport {
   private finishGizmo() {
     const st = this.gizmoObj.userData.start as Vec3;
     const p = this.gizmoObj.position;
-    const d = { dx: p.x - st[0], dy: p.y - st[1], dz: p.z - st[2], rz: THREE.MathUtils.radToDeg(this.gizmoObj.rotation.z) };
-    if (Math.hypot(d.dx, d.dy, d.dz) < 1e-6 && Math.abs(d.rz) < 1e-6) return;
+    const r = this.gizmoObj.rotation;
+    const deg = (v: number) => Math.round(THREE.MathUtils.radToDeg(v) * 1000) / 1000;
+    const d: GizmoDelta = { dx: p.x - st[0], dy: p.y - st[1], dz: p.z - st[2], rx: deg(r.x), ry: deg(r.y), rz: deg(r.z) };
+    if (Math.hypot(d.dx, d.dy, d.dz) < 1e-6 && Math.hypot(d.rx, d.ry, d.rz) < 1e-6) return;
     this.gizmoDone?.(d);
   }
 
@@ -452,6 +462,7 @@ export class Viewport {
     }
     this.applyClip();
     this.applyExplode();
+    if (this.selected) this.setSelected(this.selected);
     if (this.needsFit && bodies.length) {
       this.needsFit = false;
       this.fit();
@@ -721,7 +732,32 @@ export class Viewport {
     return { point: hit.point, normal: hit.face.normal.clone() };
   }
 
+  /** Cuerpo elegido con un clic: se ve resaltado */
+  private selected: string | null = null;
+  setSelected(id: string | null) {
+    this.selected = id;
+    for (const c of this.bodiesGroup.children) {
+      const m = c as THREE.Mesh;
+      if (!m.isMesh || c.userData.cap) continue;
+      const mat = m.material as THREE.MeshStandardMaterial;
+      mat.emissive?.set(c.userData.body === id ? css("--accent") : "#000000");
+      if (mat.emissive) mat.emissiveIntensity = c.userData.body === id ? 0.25 : 1;
+    }
+  }
+
+  private pickBody(e: PointerEvent): string | null {
+    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap);
+    const hit = this.ray(e).intersectObjects(meshes, false)[0];
+    return hit ? (hit.object.userData.body as string) : null;
+  }
+
   private click(e: PointerEvent) {
+    if (this.pickMode === "none") {
+      // si se ha soltado sobre las flechas, no cambia la elección
+      if ((this.gizmo as unknown as { axis: string | null } | null)?.axis) return;
+      this.events.onBodyClick?.(this.pickBody(e));
+      return;
+    }
     if (this.pickMode === "edge") {
       const p = this.pickEdge(e);
       if (p) this.events.onEdgePick?.([p.x, p.y, p.z]);
