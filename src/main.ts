@@ -2,11 +2,12 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
 import { CATALOG, catalogPart } from "./catalog";
+import { MATERIALS, material, bodyInfo, bom, bomCsv, KIND_LABEL, type BomBody, type Kind } from "./bim";
 import { snapsFromPaths, nearestPoint, nearestCircle, dimValue, dimAttached, dimSvg, type Snaps, type ViewXf } from "./drawdims";
 import { files, fileId, toBase64, fromBase64 } from "./files";
 import { readSvg, svgToProfiles } from "./svgimport";
@@ -101,6 +102,7 @@ $("#app").innerHTML = `
         <button class="btn small rbtn" id="measure" title="Medir distancias entre dos puntos"><i>📏</i><span>Medir</span></button>
         <button class="btn small rbtn" id="section" title="Cortar la pieza con un plano para ver el interior"><i>✂</i><span>Corte</span></button>
         <button class="btn small rbtn" id="drawing" title="Plano 2D con medidas, para imprimir o guardar en PDF"><i>📐</i><span>Plano</span></button>
+        <button class="btn small rbtn" id="bom" title="Listado de piezas: materiales, pesos y costes (BIM)"><i>🧾</i><span>Piezas</span></button>
       </div>
       <span class="sep"></span>
       <div class="vb-views">
@@ -620,10 +622,18 @@ function renderPieceInfo() {
     row("Tamaño", `${fmtEs(mx[0] - mn[0])} × ${fmtEs(mx[1] - mn[1])} × ${fmtEs(mx[2] - mn[2])} mm`),
     row("Volumen", `${fmtEs(cm3, 2)} cm³`),
     row("Superficie", `${fmtEs(area / 100, 1)} cm²`),
-    row("Peso en PLA", `${fmtEs(cm3 * 1.24)} g`),
-    row("Peso en PETG", `${fmtEs(cm3 * 1.27)} g`),
-    // filamento de 1,75 mm: sección de 2,405 mm²
-    row("Filamento 1,75 mm", `${fmtEs(vol / 2.405 / 1000, 2)} m`),
+    ...(() => {
+      // con los materiales de cada pieza (BIM); si no has puesto ninguno, todo PLA
+      const b = bom(doc, bomBodies(bodies), myPrices());
+      const mixed = b.byMaterial.length > 1 || b.byMaterial[0]?.material !== "pla" || b.rows.some((r) => r.qty > 1);
+      return [
+        row(mixed ? "Peso con sus materiales" : "Peso en PLA", `${fmtEs(b.totalWeightG)} g`),
+        ...(mixed ? [] : [row("Peso en PETG", `${fmtEs(cm3 * 1.27)} g`)]),
+        row("Coste aproximado", `${fmtEs(b.totalCost, 2)} €`),
+      ];
+    })(),
+    // filamento de 1,75 mm: sección de 2,405 mm² (solo de lo que se imprime)
+    row("Filamento 1,75 mm", `${fmtEs(bodies.filter((b) => bodyInfo(doc, b.id).kind === "print").reduce((s2, b) => s2 + (b.volume || 0) * bodyInfo(doc, b.id).qty, 0) / 2.405 / 1000, 2)} m`),
     h("div", { class: "empty" }, "Calculado como si se imprimiera maciza (100 % de relleno). Con el relleno normal de tu laminador gastará bastante menos."),
   );
   if (bodies.length > 1) box.append(h("div", { class: "empty" }, `Suma de ${bodies.length} cuerpos.`));
@@ -632,11 +642,124 @@ function renderPieceInfo() {
   renderClashCheck(box);
 }
 
+// ---------- BIM: materiales, pesos y listado de piezas ----------
+const PRICES_KEY = "geometria:precios";
+function myPrices(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(PRICES_KEY) || "{}"); } catch { return {}; }
+}
+function setPrice(mat: string, v: number) {
+  const p = myPrices(); p[mat] = v;
+  try { localStorage.setItem(PRICES_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ }
+}
+/** Cuerpos con su volumen y su tamaño, para el listado */
+function bomBodies(bodies: BodyMesh[]): BomBody[] {
+  return bodies.map((b) => {
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    const v = b.vertices;
+    for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], v[i + k]); mx[k] = Math.max(mx[k], v[i + k]); }
+    return { id: b.id, name: b.name, volume: b.volume || 0, size: [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]] as [number, number, number] };
+  });
+}
+function setInfo(id: string, patch: Partial<BodyInfo>) {
+  const cur = { ...(doc.bim?.[id] ?? {}), ...patch };
+  (doc.bim ??= {})[id] = cur;
+}
+function materialSelect(id: string) {
+  const inf = bodyInfo(doc, id);
+  const sel = h("select", { class: "mat-sel", title: "Material de esta pieza" }) as HTMLSelectElement;
+  for (const g of ["Filamento", "Madera", "Metal", "Otros"] as const) {
+    const og = h("optgroup", { label: g });
+    for (const m of MATERIALS.filter((x) => x.group === g)) og.append(h("option", { value: m.id }, m.name));
+    sel.append(og);
+  }
+  sel.value = inf.material;
+  sel.addEventListener("change", () => { setInfo(id, { material: sel.value }); changed(true); renderPieceInfo(); });
+  return sel;
+}
+
+function bomDialog() {
+  const bodies = build?.bodies ?? [];
+  if (!bodies.length) return toast("Todavía no hay ninguna pieza");
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const wrap = h("div", { class: "bom-wrap" });
+  const totals = h("div", { class: "bom-totals" });
+  const draw = () => {
+    const out = bom(doc, bomBodies(bodies), myPrices());
+    wrap.innerHTML = "";
+    const tbl = h("table", { class: "bom" });
+    tbl.append(h("thead", {}, h("tr", {}, ...["Pieza", "Cant.", "Tipo", "Material", "Referencia", "Medidas (mm)", "Peso", "Coste", "Notas"].map((t) => h("th", {}, t)))));
+    const tb = h("tbody");
+    for (const r of out.rows) {
+      const qty = h("input", { class: "bom-qty", type: "number", min: "1", step: "1", value: String(r.qty) }) as HTMLInputElement;
+      qty.addEventListener("change", () => { setInfo(r.id, { qty: Math.max(1, Math.round(Number(qty.value) || 1)) }); changed(true); draw(); });
+      const kind = h("select", { class: "bom-kind" }, ...(Object.keys(KIND_LABEL) as Kind[]).map((k) => h("option", { value: k }, KIND_LABEL[k]))) as HTMLSelectElement;
+      kind.value = r.kind;
+      kind.addEventListener("change", () => { setInfo(r.id, { kind: kind.value as Kind }); changed(true); draw(); });
+      const ref = h("input", { value: r.ref, placeholder: "—" }) as HTMLInputElement;
+      ref.addEventListener("change", () => { setInfo(r.id, { ref: ref.value.trim() || undefined }); changed(true); });
+      const notes = h("input", { value: r.notes, placeholder: "acabado, proveedor…" }) as HTMLInputElement;
+      notes.addEventListener("change", () => { setInfo(r.id, { notes: notes.value.trim() || undefined }); changed(true); });
+      let costCell: HTMLElement;
+      if (r.kind === "buy") {
+        const price = h("input", { class: "bom-price", inputmode: "decimal", value: bodyInfo(doc, r.id).price !== undefined ? String(bodyInfo(doc, r.id).price).replace(".", ",") : "", placeholder: "€/ud" }) as HTMLInputElement;
+        price.addEventListener("change", () => { const v = Number(price.value.replace(",", ".")); setInfo(r.id, { price: price.value.trim() && v >= 0 ? v : undefined }); changed(true); draw(); });
+        costCell = h("td", {}, price, h("small", { class: "block" }, `${fmtEs(r.totalCost, 2)} €`));
+      } else costCell = h("td", { class: "num" }, `${fmtEs(r.totalCost, 2)} €`);
+      tb.append(h("tr", {},
+        h("td", {}, r.name), h("td", {}, qty), h("td", {}, kind), h("td", {}, materialSelect(r.id)), h("td", {}, ref),
+        h("td", { class: "num" }, r.size.map((v) => fmtEs(v)).join(" × ")),
+        h("td", { class: "num" }, `${fmtEs(r.totalWeightG)} g`), costCell, h("td", {}, notes)));
+    }
+    tbl.append(tb);
+    wrap.append(tbl);
+    // totales por material, con su precio por kilo editable
+    totals.innerHTML = "";
+    const mt = h("table", { class: "bom bom-mat" });
+    mt.append(h("thead", {}, h("tr", {}, h("th", {}, "Material"), h("th", {}, "Peso"), h("th", {}, "Precio (€/kg)"), h("th", {}, "Coste"))));
+    const mb = h("tbody");
+    for (const m of out.byMaterial) {
+      const mat = material(m.material)!;
+      const pr = h("input", { class: "bom-price", inputmode: "decimal", value: String(myPrices()[mat.id] ?? mat.price).replace(".", ",") }) as HTMLInputElement;
+      pr.addEventListener("change", () => { const v = Number(pr.value.replace(",", ".")); if (v >= 0) { setPrice(mat.id, v); draw(); renderPieceInfo(); } });
+      mb.append(h("tr", {}, h("td", {}, m.name), h("td", { class: "num" }, `${fmtEs(m.weightG)} g`), h("td", {}, pr), h("td", { class: "num" }, `${fmtEs(m.cost, 2)} €`)));
+    }
+    mb.append(h("tr", { class: "bom-sum" }, h("td", {}, "Total"), h("td", { class: "num" }, `${fmtEs(out.totalWeightG)} g`), h("td", {}), h("td", { class: "num" }, `${fmtEs(out.totalCost, 2)} €`)));
+    mt.append(mb);
+    totals.append(h("h3", { class: "mt" }, "Por material"), mt,
+      h("div", { class: "empty" }, "Las impresas, macizas (100 % de relleno): con el relleno de tu laminador pesarán y costarán menos. Los precios por kilo son orientativos: pon los tuyos y se recuerdan."));
+  };
+  draw();
+  dlg.append(h("h2", {}, "Listado de piezas"), wrap, totals,
+    h("div", { class: "actions" },
+      h("button", { class: "btn primary", onclick: () => download(bomCsv(bom(doc, bomBodies(bodies), myPrices()).rows), `${safeName()}-piezas.csv`, "text/csv;charset=utf-8") }, "Descargar CSV (Excel)"),
+      h("button", { class: "btn", onclick: () => { $("#printarea").innerHTML = ""; $("#printarea").append(bomPrintSheet(bodies)); dlg.close(); setTimeout(() => window.print(), 50); } }, "Imprimir o guardar PDF"),
+      h("span", { class: "spacer" }),
+      h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  if (!dlg.open) dlg.showModal();
+}
+
+/** Hoja para imprimir el listado (sin campos que rellenar) */
+function bomPrintSheet(bodies: BodyMesh[]) {
+  const out = bom(doc, bomBodies(bodies), myPrices());
+  const t = h("table", { class: "bom" });
+  t.append(h("thead", {}, h("tr", {}, ...["Pieza", "Cant.", "Tipo", "Material", "Referencia", "Medidas (mm)", "Peso", "Coste", "Notas"].map((x) => h("th", {}, x)))));
+  const tb = h("tbody");
+  for (const r of out.rows) tb.append(h("tr", {}, h("td", {}, r.name), h("td", { class: "num" }, String(r.qty)), h("td", {}, KIND_LABEL[r.kind]), h("td", {}, r.materialName), h("td", {}, r.ref),
+    h("td", { class: "num" }, r.size.map((v) => fmtEs(v)).join(" × ")), h("td", { class: "num" }, `${fmtEs(r.totalWeightG)} g`), h("td", { class: "num" }, `${fmtEs(r.totalCost, 2)} €`), h("td", {}, r.notes)));
+  for (const m of out.byMaterial) tb.append(h("tr", { class: "bom-sub" }, h("td", { colspan: "6" }, `Total ${m.name}`), h("td", { class: "num" }, `${fmtEs(m.weightG)} g`), h("td", { class: "num" }, `${fmtEs(m.cost, 2)} €`), h("td", {})));
+  tb.append(h("tr", { class: "bom-sum" }, h("td", { colspan: "6" }, "Total"), h("td", { class: "num" }, `${fmtEs(out.totalWeightG)} g`), h("td", { class: "num" }, `${fmtEs(out.totalCost, 2)} €`), h("td", {})));
+  t.append(tb);
+  return h("div", { class: "bom-print" }, h("h1", {}, `Listado de piezas · ${doc.name}`),
+    h("p", {}, `${new Date().toLocaleDateString("es-ES")} · Hecho con Geometría · Piezas impresas calculadas macizas`), t);
+}
+$("#bom").addEventListener("click", bomDialog);
+
 // ---------- colores por cuerpo ----------
 const DEFAULT_COLOR = "#9aa7b8";
 const PALETTE = ["#e8743b", "#3b7dd8", "#4cae4c", "#d9b43b", "#8a4fd8", "#22201c", "#f4f2ee", "#c8402f"];
 function renderColors(box: HTMLElement, bodies: { id: string; name: string }[]) {
-  box.append(h("h3", { class: "mt" }, "Colores",
+  box.append(h("h3", { class: "mt" }, "Colores y materiales",
     doc.colors && Object.keys(doc.colors).length ? h("button", { class: "btn small", onclick: () => { delete doc.colors; changed(true); renderPieceInfo(); } }, "Quitar") : null));
   bodies.forEach((b, i) => {
     const input = h("input", { type: "color", value: doc.colors?.[b.id] ?? DEFAULT_COLOR, title: "Color de este cuerpo" }) as HTMLInputElement;
@@ -650,7 +773,7 @@ function renderColors(box: HTMLElement, bodies: { id: string; name: string }[]) 
       (doc.colors ??= {})[b.id] = PALETTE[i % PALETTE.length];
       changed(true); renderPieceInfo();
     } }, "↻");
-    box.append(h("div", { class: "color-row" }, input, h("span", { class: "grow" }, b.name), quick));
+    box.append(h("div", { class: "color-row" }, input, h("span", { class: "grow" }, b.name), materialSelect(b.id), quick));
   });
   box.append(h("div", { class: "empty" }, "Cada cuerpo sale como un objeto aparte en el 3MF, con su color. En Bambu Studio u Orca asígnale después el filamento del AMS a cada objeto (el color guardado sirve de guía; no todos los laminadores lo leen)."));
 }

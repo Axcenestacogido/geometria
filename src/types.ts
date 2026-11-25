@@ -390,6 +390,19 @@ export interface Doc {
   files?: Record<string, { name: string; format: "step" | "stl" | "image"; data: string }>;
   /** Cotas que añades tú en el plano 2D */
   dims?: DrawingDim[];
+  /** Ficha BIM de cada cuerpo (id del cuerpo → material, cantidad…) */
+  bim?: Record<string, BodyInfo>;
+}
+
+/** Ficha de una pieza para el listado: material, si se imprime o se compra, cantidad… */
+export interface BodyInfo {
+  material?: string;
+  kind?: "print" | "make" | "buy";
+  qty?: number;
+  ref?: string;
+  notes?: string;
+  /** precio por unidad (€), para las que se compran */
+  price?: number;
 }
 
 /**
