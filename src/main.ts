@@ -14,12 +14,13 @@ import { docForRow, rowFileName, rowFromDoc, currentRow } from "./family";
 import { makeZip } from "./zip";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
-import { Viewport, type ViewName, type GizmoDelta } from "./viewport";
+import { Viewport, type ViewName, type GizmoDelta, type MeasureItem } from "./viewport";
 import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
 import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
 import { edgeShapes } from "./edgeloops";
+import { planesAngle } from "./measure";
 import { Dxf, addSvgPaths } from "./dxf";
 import { cloud, docFileIds, type CloudStatus } from "./cloud";
 import {
@@ -2366,15 +2367,8 @@ function renderBanner() {
   } else if (measuring) {
     b.hidden = false;
     b.innerHTML = "";
-    const pts = viewport.measurePts;
-    let txt = "Medir: haz clic en dos puntos (vértices, aristas o caras)";
-    if (pts.length === 1) txt = "Ahora el segundo punto";
-    if (pts.length === 2) {
-      const [a, c] = pts;
-      const dx = c[0] - a[0], dy = c[1] - a[1], dz = c[2] - a[2];
-      txt = `Distancia ${fmt(Math.hypot(dx, dy, dz))} mm  ·  X ${fmt(Math.abs(dx))}  Y ${fmt(Math.abs(dy))}  Z ${fmt(Math.abs(dz))}`;
-    }
-    b.append(txt, h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
+    b.append(measureText(viewport.measureItems));
+    b.append(h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
   } else if (f && (f.type === "fillet" || f.type === "chamfer")) {
     b.hidden = false;
     b.textContent = pickFacesForEdges ? `${f.name}: elige caras con un clic` : `${f.name}: elige aristas con un clic`;
@@ -3291,6 +3285,29 @@ renderPerspBtn();
 if (!viewport.perspective3d) viewport.view("iso");
 
 // medir
+/** Lo que dice la barra de medir según lo que hayas tocado */
+function measureText(items: MeasureItem[]): string {
+  const es = (v: number, d: number) => v.toLocaleString("es-ES", { maximumFractionDigits: d });
+  const deg = (v: number) => `${es(v, 1)}°`;
+  const mm = (v: number) => `${es(v, 2)} mm`;
+  const [a, c] = items;
+  if (!a) return "Medir: clic en dos puntos, en dos caras (ángulo) o en un círculo o agujero (diámetro)";
+  if (a.kind === "circle") {
+    const { r, sweep } = a.circle;
+    return sweep > 359 ? `Círculo Ø ${mm(2 * r)}  ·  radio ${mm(r)}` : `Arco de radio ${mm(r)}  ·  ${deg(sweep)}  ·  Ø ${mm(2 * r)}`;
+  }
+  if (a.kind === "face" && a.face.kind === "cylinder") {
+    if (!a.face.full) return `Cara curva de radio ${mm(a.face.r)}  ·  Ø ${mm(2 * a.face.r)}`;
+    return `${a.face.hole ? "Agujero" : "Cilindro"} Ø ${mm(2 * a.face.r)}  ·  radio ${mm(a.face.r)}`;
+  }
+  if (!c) return a.kind === "face" && a.face.kind === "plane" ? "Cara plana: clic en otra cara para el ángulo, o en un punto para la distancia" : "Ahora el segundo punto";
+  if (a.kind === "face" && c.kind === "face" && a.face.kind === "plane" && c.face.kind === "plane") {
+    const r = planesAngle(a.face.normal, a.p, c.face.normal, c.p);
+    return r.gap !== null ? `Caras paralelas, separadas ${mm(r.gap)}` : `Ángulo entre caras ${deg(r.angle)}` + (Math.abs(r.angle - 90) > 0.05 ? `  ·  (${deg(180 - r.angle)} por el otro lado)` : "");
+  }
+  const dx = c.p[0] - a.p[0], dy = c.p[1] - a.p[1], dz = c.p[2] - a.p[2];
+  return `Distancia ${fmt(Math.hypot(dx, dy, dz))} mm  ·  X ${fmt(Math.abs(dx))}  Y ${fmt(Math.abs(dy))}  Z ${fmt(Math.abs(dz))}`;
+}
 let measuring = false;
 function startMeasure() {
   if (active) setActive(null);

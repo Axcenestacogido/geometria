@@ -6,14 +6,21 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import type { BodyMesh, Vec3 } from "./types";
 import type { Basis } from "./geom";
+import { circleFrom, faceKind, type Circle3, type FaceKind } from "./measure";
 
 export type PickMode = "none" | "edge" | "face" | "measure";
+
+/** Lo que se ha tocado al medir: un punto, una arista circular o una cara (plana o cilíndrica) */
+export type MeasureItem =
+  | { kind: "point"; p: Vec3 }
+  | { kind: "circle"; p: Vec3; circle: Circle3 }
+  | { kind: "face"; p: Vec3; face: FaceKind };
 export type ViewName = "iso" | "top" | "bottom" | "front" | "back" | "left" | "right";
 
 export interface ViewportEvents {
   onEdgePick?: (point: Vec3) => void;
   onFacePick?: (point: Vec3, normal: Vec3) => void;
-  onMeasure?: (points: Vec3[]) => void;
+  onMeasure?: (items: MeasureItem[]) => void;
   /** clic sin herramienta: el cuerpo que hay debajo (o null si es el vacío) */
   onBodyClick?: (id: string | null) => void;
   /** botón derecho sin arrastrar: cuerpo debajo (o null) y dónde abrir el menú */
@@ -69,6 +76,7 @@ export class Viewport {
   private edgeObjects: { line: THREE.LineSegments; pts: Float32Array; groups: { start: number; count: number }[] }[] = [];
   private bodyData: BodyMesh[] = [];
   measurePts: Vec3[] = [];
+  measureItems: MeasureItem[] = [];
   pickMode: PickMode = "none";
   events: ViewportEvents = {};
   private needsFit = true;
@@ -494,7 +502,8 @@ export class Viewport {
       lg.setAttribute("position", new THREE.BufferAttribute(b.lines, 3));
       const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: edgeColor }));
       lines.userData.body = b.id;
-      this.edgeObjects.push({ line: lines, pts: b.lines, groups: b.edgeGroups });
+      // replicad cuenta las aristas en puntos; aquí se pasan a posiciones del array (×3)
+      this.edgeObjects.push({ line: lines, pts: b.lines, groups: b.edgeGroups.map((g) => ({ start: g.start * 3, count: g.count * 3 })) });
       // la "tapa" del corte: las caras de dentro, en color plano
       // (más oscura que el cuerpo, para que se distinga del resto)
       const capColor = (colors[b.id] ? new THREE.Color(colors[b.id]) : new THREE.Color(css("--cap"))).multiplyScalar(colors[b.id] ? 0.55 : 1);
@@ -645,7 +654,74 @@ export class Viewport {
   // ---------- medir ----------
   clearMeasure() {
     this.measurePts = [];
+    this.measureItems = [];
     this.drawMeasure();
+  }
+
+  /**
+   * Qué hay bajo el ratón para medir: un vértice (punto), una arista (si es un círculo o un arco,
+   * con su centro y radio) o una cara (plana, o cilíndrica con su diámetro).
+   */
+  private pickMeasureItem(e: PointerEvent): MeasureItem | null {
+    const tol = this.worldPerPixel() * 10;
+    const onEdge = this.pickEdge(e);
+    if (onEdge) {
+      // vértice cerca: manda el punto
+      const a = new THREE.Vector3();
+      const b2 = new THREE.Vector3();
+      for (const eo of this.edgeObjects) if (eo.line.visible) for (const g of eo.groups) {
+        // un círculo cerrado empieza y acaba en el mismo punto: esa «costura» no es un vértice de verdad
+        a.fromArray(eo.pts, g.start); b2.fromArray(eo.pts, g.start + g.count - 3);
+        if (g.count > 6 && a.distanceTo(b2) < 1e-6) continue;
+        for (const i of [g.start, g.start + g.count - 3]) {
+          a.fromArray(eo.pts, i);
+          if (a.distanceTo(onEdge) < tol) return { kind: "point", p: [a.x, a.y, a.z] };
+        }
+      }
+      const seg = this.nearestEdge(onEdge, 1e-3 + this.worldPerPixel());
+      if (seg) {
+        const pts: Vec3[] = [];
+        for (let i = 0; i < seg.length; i += 6) pts.push([seg[i], seg[i + 1], seg[i + 2]]);
+        if (seg.length >= 6) pts.push([seg[seg.length - 3], seg[seg.length - 2], seg[seg.length - 1]]);
+        const circle = circleFrom(pts);
+        if (circle) return { kind: "circle", p: [onEdge.x, onEdge.y, onEdge.z], circle };
+      }
+      return { kind: "point", p: [onEdge.x, onEdge.y, onEdge.z] };
+    }
+    const f = this.pickFace(e);
+    if (!f) return null;
+    const g = this.faceGroupAt(f.point);
+    const face: FaceKind = g ? faceKind(g.verts, g.normals) : { kind: "plane", normal: [f.normal.x, f.normal.y, f.normal.z] };
+    return { kind: "face", p: [f.point.x, f.point.y, f.point.z], face };
+  }
+
+  /** Vértices y normales de la cara (de la malla) más cercana al punto */
+  private faceGroupAt(p: THREE.Vector3): { verts: Vec3[]; normals: Vec3[] } | null {
+    let best: { d: number; b: BodyMesh; g: { start: number; count: number } } | null = null;
+    const tri = new THREE.Triangle(), q = new THREE.Vector3();
+    const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+    for (const b of this.bodyData) {
+      if (this.hiddenIds.has(b.id)) continue;
+      for (const g of b.faceGroups) {
+        let d = Infinity;
+        for (let i = g.start; i < g.start + g.count; i += 3) {
+          A.fromArray(b.vertices, b.triangles[i] * 3); B.fromArray(b.vertices, b.triangles[i + 1] * 3); C.fromArray(b.vertices, b.triangles[i + 2] * 3);
+          tri.set(A, B, C).closestPointToPoint(p, q);
+          d = Math.min(d, q.distanceTo(p));
+        }
+        if (!best || d < best.d) best = { d, b, g };
+      }
+    }
+    if (!best || best.d > 1) return null;
+    const seen = new Set<number>(), verts: Vec3[] = [], normals: Vec3[] = [];
+    for (let k = best.g.start; k < best.g.start + best.g.count; k++) {
+      const vi = best.b.triangles[k];
+      if (seen.has(vi)) continue;
+      seen.add(vi);
+      verts.push([best.b.vertices[vi * 3], best.b.vertices[vi * 3 + 1], best.b.vertices[vi * 3 + 2]]);
+      normals.push([best.b.normals[vi * 3], best.b.normals[vi * 3 + 1], best.b.normals[vi * 3 + 2]]);
+    }
+    return { verts, normals };
   }
 
   private drawMeasure() {
@@ -657,6 +733,17 @@ export class Viewport {
       s.position.set(...p);
       s.renderOrder = 10;
       this.measureGroup.add(s);
+    }
+    for (const m of this.measureItems) {
+      if (m.kind !== "circle") continue;
+      // el círculo reconocido, resaltado
+      const { center, normal, r } = m.circle;
+      const n = new THREE.Vector3(...normal), t = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      const u = new THREE.Vector3().crossVectors(n, t).normalize(), w = new THREE.Vector3().crossVectors(n, u);
+      const pts = Array.from({ length: 65 }, (_, i) => { const a = (i / 64) * Math.PI * 2; return new THREE.Vector3(...center).addScaledVector(u, r * Math.cos(a)).addScaledVector(w, r * Math.sin(a)); });
+      const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, depthTest: false }));
+      l.renderOrder = 10;
+      this.measureGroup.add(l);
     }
     if (this.measurePts.length === 2) {
       const g = new THREE.BufferGeometry().setFromPoints(this.measurePts.map((p) => new THREE.Vector3(...p)));
@@ -758,8 +845,13 @@ export class Viewport {
     const rc = this.ray(e);
     const hits = rc.intersectObjects(this.edgeObjects.filter((o) => o.line.visible).map((o) => o.line), false).filter((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hits.length) return null;
+    // una arista tapada por una cara (detrás de ella) no cuenta
+    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap && c.visible);
+    const face = rc.intersectObjects(meshes, false).find((fh) => !this.section || this.section.distanceToPoint(fh.point) >= -1e-6);
+    const slack = this.worldPerPixel() * 4 + 1e-3;
+    const h = hits.find((x) => !face || x.distance <= face.distance + slack);
+    if (!h) return null;
     // proyectar el punto exactamente sobre el segmento tocado
-    const h = hits[0];
     const pts = (h.object as THREE.LineSegments).geometry.getAttribute("position");
     const i = h.index!;
     const a = new THREE.Vector3().fromBufferAttribute(pts, i), b = new THREE.Vector3().fromBufferAttribute(pts, i + 1);
@@ -923,12 +1015,15 @@ export class Viewport {
       const f = this.pickFace(e);
       if (f) this.events.onFacePick?.([f.point.x, f.point.y, f.point.z], [f.normal.x, f.normal.y, f.normal.z]);
     } else if (this.pickMode === "measure") {
-      const p = this.pickMeasure(e);
-      if (!p) return;
-      if (this.measurePts.length >= 2) this.measurePts = [];
-      this.measurePts.push([p.x, p.y, p.z]);
+      const it = this.pickMeasureItem(e);
+      if (!it) return;
+      // un círculo o un cilindro se mide solo, con un clic; si ya había dos cosas, empieza de nuevo
+      const alone = it.kind === "circle" || (it.kind === "face" && it.face.kind === "cylinder");
+      if (this.measureItems.length >= 2 || alone || this.measureItems.some((m) => m.kind === "circle" || (m.kind === "face" && m.face.kind === "cylinder"))) this.measureItems = [];
+      this.measureItems.push(it);
+      this.measurePts = this.measureItems.map((m) => (m.kind === "circle" ? m.circle.center : m.p));
       this.drawMeasure();
-      this.events.onMeasure?.(this.measurePts);
+      this.events.onMeasure?.(this.measureItems);
     }
   }
 
