@@ -193,6 +193,14 @@ export class Viewport {
   }
 
   /** Centro de la caja de un cuerpo dibujado */
+  /** Caja de un cuerpo dibujado: [mínimo, máximo] */
+  bodyBox(id: string): [Vec3, Vec3] | null {
+    const box = new THREE.Box3();
+    for (const c of this.bodiesGroup.children) if (c.userData.body === id && (c as THREE.Mesh).isMesh && !c.userData.cap) box.expandByObject(c);
+    if (box.isEmpty()) return null;
+    return [[box.min.x, box.min.y, box.min.z], [box.max.x, box.max.y, box.max.z]];
+  }
+
   bodyCenter(id: string): Vec3 | null {
     const box = new THREE.Box3();
     for (const c of this.bodiesGroup.children) if (c.userData.body === id && (c as THREE.Mesh).isMesh && !c.userData.cap) box.expandByObject(c);

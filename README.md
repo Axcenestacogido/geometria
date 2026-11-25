@@ -45,6 +45,9 @@ descargarlas como `.json` para pasarlas a otro).
 | **Mis piezas** | Galería con miniatura de cada pieza, buscador, abrir, duplicar y borrar. |
 | **Unión (ensamblaje)** | Bisagra (gira alrededor de un eje) o guía (desliza), con deslizador entre mínimo y máximo. «Recorrer y buscar choques» la mueve de punta a punta y dice dónde choca algo. Plantilla «Caja con tapa abatible». |
 | **Choques entre cuerpos** | En la información de la pieza: dice qué cuerpos se meten uno en otro y pinta la zona en rojo. Tocarse no cuenta. |
+| **Mi holgura** | Archivo → Mi holgura. Imprime la plantilla «Prueba de holguras», mira qué agujero encaja y guárdalo: se usa en agujeros, catálogo, partir y plantillas. |
+| **Catálogo** | Rodamientos (608, 625, 688, 6001), imanes, insertos de calor M2-M5, tuercas M3-M8, perfil 2020, servo SG90 y NEMA 17. Como pieza o como hueco con holgura. |
+| **Partir** | Corta una pieza que no cabe en la cama en dos, con espigas sueltas o pegadas que se colocan solas donde caben. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |

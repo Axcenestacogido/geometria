@@ -156,7 +156,33 @@ function hingedLid(): Doc {
   };
 }
 
+/**
+ * Prueba de holguras: una placa con 5 agujeros, cada uno un poco más holgado, y una
+ * espiga. La holgura con la que la espiga entra a mano sin bailar es «tu holgura».
+ */
+function fitTest(): Doc {
+  const steps = [0.1, 0.15, 0.2, 0.3, 0.4];
+  const f: Feature[] = [
+    { id: "placa", type: "box", name: "Placa", x: E("0"), y: E("0"), z: E("0"), w: E(`${steps.length} * paso_x`), d: E("18"), h: E("alto"), op: "new" },
+  ];
+  steps.forEach((s, i) => {
+    f.push({ id: id("a"), type: "cylinder", name: `Agujero ${s}`, x: E(`paso_x * ${i} + paso_x/2`), y: E("7"), z: E("-1"), r: E(`(espiga + ${s}) / 2`), h: E("alto + 2"), op: "cut", target: "placa" });
+    f.push({ id: id("t"), type: "text", name: `Número ${s}`, text: String(s).replace(".", ","), font: "sans-bold", size: E("3.2"), depth: E("0.6"), angle: E("0"),
+      points: [{ x: E(`paso_x * ${i} + paso_x/2`), y: E("15"), z: E("alto"), n: [0, 0, 1] }], op: "cut", target: "placa" });
+  });
+  f.push(
+    { id: "espiga", type: "cylinder", name: "Espiga", x: E(`${steps.length} * paso_x + 12`), y: E("9"), z: E("0"), r: E("espiga / 2"), h: E("alto + 6"), op: "new" },
+    { id: id("c"), type: "cylinder", name: "Cabeza de la espiga", x: E(`${steps.length} * paso_x + 12`), y: E("9"), z: E("0"), r: E("espiga / 2 + 2"), h: E("2"), op: "add", target: "espiga" },
+  );
+  return {
+    version: 1, name: "Prueba de holguras",
+    variables: [{ name: "espiga", value: E("6") }, { name: "alto", value: E("5") }, { name: "paso_x", value: E("12") }],
+    features: f,
+  };
+}
+
 export const TEMPLATES: Template[] = [
+  { id: "holguras", name: "Prueba de holguras", info: "Imprímela (sin cambiar nada) y mete la espiga en cada agujero. El número del que entra a mano sin bailar es tu holgura: guárdala en Archivo → Mi holgura y se usará en agujeros, piezas de catálogo y plantillas.", make: fitTest },
   { id: "caja", name: "Caja con tapa a presión", info: "La tapa encaja por dentro con un labio. «holgura» decide lo que aprieta: 0,1 aprieta mucho, 0,3 entra suelta.", make: snapBox },
   { id: "abatible", name: "Caja con tapa abatible (ensamblaje)", info: "Abre la tapa con el deslizador del paso «Bisagra de la tapa» y pulsa «Recorrer y buscar choques». Prueba a subir «labio» a 5: la tapa choca con la pared de delante al abrirse.", make: hingedLid },
   { id: "bisagra", name: "Bisagra imprimible", info: "Se imprime ya montada, de una vez, tumbada como sale. «holgura» es el hueco entre piezas: 0,4 va bien en la Bambu con boquilla de 0,4.", make: hinge },

@@ -2,10 +2,11 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
+import { CATALOG, catalogPart } from "./catalog";
 import { snapsFromPaths, nearestPoint, nearestCircle, dimValue, dimAttached, dimSvg, type Snaps, type ViewXf } from "./drawdims";
 import { files, fileId, toBase64, fromBase64 } from "./files";
 import { readSvg, svgToProfiles } from "./svgimport";
@@ -17,7 +18,7 @@ import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
-  FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, type ResolveOut,
+  FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, myFit, setMyFit, type ResolveOut,
 } from "./state";
 
 // ======================================================================
@@ -76,6 +77,7 @@ $("#app").innerHTML = `
     <button data-a="version">Guardar versión…<small>Una foto de cómo está ahora, con nombre</small></button>
     <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
     <button data-a="example">Abrir el ejemplo</button>
+    <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
     <button data-a="templates">Plantillas…<small>Caja, bisagra, engranajes, muelle, clip, tornillo</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
     <button data-a="save-file">Descargar proyecto (.json)<small>Para guardarlo o pasarlo a otro equipo</small></button>
@@ -246,7 +248,7 @@ function rebuild() {
     const f = doc.features.find((x) => x.id === active);
     // al editar un boceto o un redondeo se ve la pieza como estaba antes de ese paso
     // al mover un cuerpo se ve la pieza justo después de ese paso (aún sin los siguientes)
-    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" || f?.type === "joint" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
+    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" || f?.type === "joint" || f?.type === "split" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
     worker.postMessage({ kind: "build", seq: ++seq, features: resolved.features, upTo });
     if (!upTo) buildFullBySeq = seq;
   }, 90);
@@ -333,14 +335,14 @@ function renderUndo() {
 const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
-  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" },
+  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" }, { type: "catalog" }, { type: "split" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
   { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
   { type: "component" }, { type: "layflat" },
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión",
+  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
@@ -351,6 +353,8 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
   transform: "Mover, girar o escalar un cuerpo (o una copia), con flechas o con números",
   combine: "Sumar, restar o intersecar cuerpos que ya existen",
+  catalog: "Piezas que se compran (rodamientos, imanes, insertos, tuercas, perfil 2020, servo, NEMA 17), o el hueco justo para meterlas",
+  split: "Partir una pieza que no cabe en la cama, con espigas para unir las partes",
   joint: "Ensamblaje: une cuerpos con una bisagra (gira) o una guía (desliza) y comprueba si chocan al moverse",
   gear: "Rueda dentada recta: eliges el módulo y los dientes",
   spring: "Muelle de compresión: diámetro, hilo, paso y vueltas",
@@ -363,7 +367,7 @@ function renderTools() {
   const hasBody = !!build?.bodies.length;
   for (const t of ADD) {
     const needSketch = t.type === "extrude" || t.type === "revolve" || t.type === "sweep" || t.type === "loft";
-    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine"].includes(t.type);
+    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine", "joint", "split"].includes(t.type);
     box.append(h("button", {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
@@ -375,6 +379,17 @@ function renderTools() {
 
 function addFeature(type: Feature["type"]) {
   const f = newFeature(doc, type);
+  if (f.type === "split") {
+    // por defecto, por la mitad del último cuerpo y a lo largo de su lado más largo
+    const last = build?.bodies.at(-1);
+    const bb = last ? viewport.bodyBox(last.id) : null;
+    if (bb) {
+      const size = [0, 1, 2].map((k) => bb[1][k] - bb[0][k]);
+      const ax = size.indexOf(Math.max(...size));
+      f.axis = (["x", "y", "z"] as const)[ax];
+      f.at = fmt(Math.round(((bb[0][ax] + bb[1][ax]) / 2) * 10) / 10);
+    }
+  }
   doc.features.push(f);
   setActive(f.id);
   changed(true, true);
@@ -896,6 +911,64 @@ function renderProps() {
       sec.append(exprField("Escala", () => f.scale, (v) => (f.scale = v), k("scale"), { hint: "1 = igual · 2 = el doble · 0,5 = la mitad" }));
       break;
     }
+    case "catalog": {
+      const sel = h("select", {}) as HTMLSelectElement;
+      for (const g of [...new Set(CATALOG.map((p) => p.group))]) {
+        const og = h("optgroup", { label: g });
+        for (const p of CATALOG.filter((x) => x.group === g)) og.append(h("option", { value: p.id, ...(p.id === f.part ? { selected: true } : {}) }, p.name));
+        sel.append(og);
+      }
+      sel.value = f.part;
+      sel.addEventListener("change", () => { f.part = sel.value; changed(true, true); });
+      sec.append(h("div", { class: "field" }, h("label", {}, "Pieza"), sel));
+      const part = catalogPart(f.part);
+      if (part) sec.append(h("div", { class: "empty" }, part.info));
+      sec.append(selectField("Qué poner", f.op === "cut" ? "cut" : f.op === "new" ? "new" : "add", [["cut", "El hueco para meterla (resta)"], ["new", "La pieza, para ver cómo queda"], ["add", "La pieza, sumada al cuerpo"]], (v) => (f.op = v as never)));
+      if (f.op !== "new") {
+        const before = build?.bodiesBefore[f.id] ?? [];
+        if (before.length > 1) sec.append(selectField("Sobre", f.target ?? "", [["", "El último cuerpo"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => (f.target = v || undefined)));
+      }
+      if (f.op === "cut") {
+        if (part?.kind === "insert") sec.append(h("div", { class: "msg info" }, "El agujero de un inserto va sin holgura: el plástico se funde al meterlo con el soldador."));
+        else sec.append(exprField("Holgura", () => f.fit, (v) => (f.fit = v), k("fit"), { hint: `en diámetro; tu holgura es ${fmtEs(myFit(), 2)}` }));
+      }
+      if (part?.kind === "profile") sec.append(exprField("Largo", () => f.length, (v) => (f.length = v), k("length")));
+      sec.append(h("h3", { class: "mt" }, "Dónde"));
+      sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+      sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+      sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+      sec.append(exprField("Girar en X", () => f.rx, (v) => (f.rx = v), k("rx"), { unit: "°", hint: "180 = boca abajo (hueco desde la cara de arriba)" }));
+      sec.append(exprField("Girar en Z", () => f.rz, (v) => (f.rz = v), k("rz"), { unit: "°" }));
+      sec.append(h("div", { class: "empty" }, "El punto X, Y, Z es la boca del hueco (la base de la pieza). En la lista de piezas sale como pieza comprada."));
+      break;
+    }
+    case "split": {
+      const before = build?.bodiesBefore[f.id] ?? [];
+      sec.append(selectField("Cuerpo", f.body, [["", "El último"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => (f.body = v)));
+      sec.append(selectField("Cortar a lo largo de", f.axis, [["x", "X (corte de lado a lado)"], ["y", "Y (corte de delante a atrás)"], ["z", "Z (corte horizontal)"]], (v) => (f.axis = v as SplitFeature["axis"])));
+      sec.append(exprField("Dónde", () => f.at, (v) => (f.at = v), k("at"), { hint: `${f.axis.toUpperCase()} del corte, en mm` }));
+      sec.append(h("button", { class: "btn small", onclick: () => {
+        // centro del cuerpo entero: parte 1 + parte 2 (quitando la separación)
+        const rf = resolveDoc(doc).features.find((x) => x.id === f.id) as Resolved<SplitFeature> | undefined;
+        const tgt = f.body || before.at(-1)?.id || "";
+        const ax = f.axis === "x" ? 0 : f.axis === "y" ? 1 : 2;
+        const a = viewport.bodyBox(tgt), b = viewport.bodyBox(f.id);
+        if (!a) return toast("No veo ese cuerpo ahora");
+        const hi = b ? b[1][ax] - (rf?.gap ?? 0) : a[1][ax];
+        f.at = fmt(Math.round(((a[0][ax] + hi) / 2) * 10) / 10);
+        changed(true, true);
+      } }, "Partir por la mitad"));
+      if (printSt.bedX) sec.append(h("div", { class: "empty" }, `Tu cama es de ${printSt.bedX} × ${printSt.bedY} × ${printSt.bedZ} mm: cada parte tiene que caber.`));
+      sec.append(selectField("Unión entre partes", f.pins, [["loose", "Agujeros + espigas sueltas (recomendado)"], ["fixed", "Espigas pegadas a la parte 1"], ["none", "Sin espigas (solo pegar)"]], (v) => (f.pins = v as SplitFeature["pins"])));
+      if (f.pins !== "none") {
+        sec.append(exprField("Espigas", () => f.count, (v) => (f.count = v), k("count"), { unit: "", hint: "cuántas; se colocan solas donde caben" }));
+        sec.append(exprField("Diámetro", () => f.pinD, (v) => (f.pinD = v), k("pinD")));
+        sec.append(exprField("Largo total", () => f.pinL, (v) => (f.pinL = v), k("pinL")));
+        sec.append(exprField("Holgura", () => f.fit, (v) => (f.fit = v), k("fit"), { hint: `en diámetro; tu holgura es ${fmtEs(myFit(), 2)}` }));
+      }
+      sec.append(exprField("Separar para verlas", () => f.gap, (v) => (f.gap = v), k("gap"), { hint: "solo para ver las partes; 0 = juntas" }));
+      break;
+    }
     case "joint": {
       const before = build?.bodiesBefore[f.id] ?? [];
       const hinge = f.kind === "hinge";
@@ -1284,6 +1357,33 @@ function componentDialog() {
 }
 const d_count = (id: string) => storage.load(id)?.features.length ?? 0;
 
+const hasMyFit = () => { try { return localStorage.getItem("geometria:holgura") !== null; } catch { return false; } };
+
+/** Tu holgura: la que salió bien en la prueba de holguras */
+function fitDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const inp = h("input", { value: fmt(myFit()), inputmode: "decimal" }) as HTMLInputElement;
+  const ok = () => {
+    const v = Number(inp.value.replace(",", "."));
+    if (!(v > 0 && v < 2)) { inp.classList.add("bad"); return; }
+    setMyFit(v);
+    dlg.close();
+    toast(`Tu holgura: ${fmtEs(v, 2)} mm. Se usará en agujeros, catálogo, partir y plantillas nuevas.`);
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") ok(); });
+  dlg.append(h("h2", {}, "Mi holgura"),
+    h("p", { class: "empty" }, "Es cuánto más grande (en diámetro) tiene que ser un agujero para que entre una pieza a mano, sin bailar. Depende de tu impresora, la boquilla y el filamento."),
+    h("div", { class: "msg info" }, "1. Abre la plantilla «Prueba de holguras» e imprímela. 2. Mete la espiga en cada agujero. 3. Escribe aquí el número del primero en el que entra bien."),
+    h("div", { class: "field" }, h("label", {}, "Holgura (mm)"), inp),
+    h("div", { class: "t-right" },
+      h("button", { class: "btn", onclick: () => { dlg.close(); const t = TEMPLATES.find((x) => x.id === "holguras")!; setDoc(t.make(), uid()); toast("Prueba de holguras abierta: expórtala a 3MF e imprímela"); } }, "Abrir la prueba"), " ",
+      h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar"), " ",
+      h("button", { class: "btn primary", onclick: ok }, "Guardar")));
+  dlg.showModal();
+  inp.select();
+}
+
 function templatesDialog() {
   const dlg = $("#dlg") as HTMLDialogElement;
   dlg.innerHTML = "";
@@ -1292,7 +1392,15 @@ function templatesDialog() {
   const box = h("div", { class: "list" });
   for (const t of TEMPLATES) {
     box.append(h("div", { class: "it" },
-      h("span", { onclick: () => { dlg.close(); setDoc(t.make(), uid()); toast(`Plantilla «${t.name}» abierta`); } }, t.name, h("small", { class: "block" }, t.info)),
+      h("span", { onclick: () => {
+        dlg.close();
+        const d = t.make();
+        // tu holgura, salvo en la bisagra (se imprime montada y necesita más hueco)
+        const v = d.variables.find((x) => x.name === "holgura");
+        if (v && hasMyFit() && t.id !== "bisagra") v.value = String(myFit()) as never;
+        setDoc(d, uid());
+        toast(`Plantilla «${t.name}» abierta`);
+      } }, t.name, h("small", { class: "block" }, t.info)),
     ));
   }
   dlg.append(box, h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
@@ -2143,6 +2251,7 @@ function fileAction(a: string) {
   else if (a === "version") saveVersionDialog();
   else if (a === "history") historyDialog();
   else if (a === "templates") templatesDialog();
+  else if (a === "fit") fitDialog();
   else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();
 }
@@ -2266,4 +2375,4 @@ function renderAll() {
 renderAll();
 rebuild();
 // para depurar desde la consola
-(window as unknown as Record<string, unknown>).geometria = { get doc() { return doc; }, setDoc, viewport };
+(window as unknown as Record<string, unknown>).geometria = { get doc() { return doc; }, get build() { return build; }, setDoc, viewport };

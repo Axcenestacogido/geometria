@@ -9,6 +9,7 @@ import { planeBasis, scale as vscale, type Basis } from "./geom";
 import { buildModel3mf } from "./threemf";
 import { SCREWS } from "./screws";
 import { gearOutline } from "./gear";
+import { catalogPart, hexagon, type CatalogPart } from "./catalog";
 /** pasos cuyo sólido conviene dibujar con menos detalle */
 const coarseIds = new Set<string>();
 import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash } from "./types";
@@ -732,7 +733,8 @@ function runFeatures(features: RF[], upTo?: string) {
     }
     try {
       // si le has puesto nombre propio al paso («Tapa»), el cuerpo se llama así
-      const label = f.name && !/\s\d+$/.test(f.name.trim()) ? f.name.trim() : `Cuerpo ${solidCount + 1}`;
+      const label = f.name && !/\s\d+$/.test(f.name.trim()) ? f.name.trim()
+        : f.type === "catalog" ? catalogPart(f.part)?.name ?? `Cuerpo ${solidCount + 1}` : `Cuerpo ${solidCount + 1}`;
       const isNew = () => "op" in f && (f.op === "new" || !bodies.length);
       let shape: Shape | null = null;
       switch (f.type) {
@@ -824,6 +826,26 @@ function runFeatures(features: RF[], upTo?: string) {
           if (f.dx || f.dy || f.dz) sh = sh.translate([f.dx, f.dy, f.dz]) as Shape;
           if (f.copy) bodies.push({ id: f.id, name: `${b.name} (copia)`, shape: sh, coarse: b.coarse });
           else bodies[idx] = { ...b, shape: sh };
+          break;
+        }
+        case "catalog": {
+          const part = catalogPart(f.part);
+          if (!part) throw new Error("elige una pieza del catálogo");
+          if (f.fit < 0 || f.fit > 2) throw new Error("la holgura tiene que estar entre 0 y 2 mm");
+          let sh = catalogShape(part, f.op === "cut", f.fit, f.length);
+          if (f.rx) sh = sh.rotate(f.rx, [0, 0, 0], [1, 0, 0]) as Shape;
+          if (f.rz) sh = sh.rotate(f.rz, [0, 0, 0], [0, 0, 1]) as Shape;
+          shape = sh.translate([f.x, f.y, f.z]) as Shape;
+          break;
+        }
+        case "split": {
+          const idx = f.body ? bodies.findIndex((b) => b.id === f.body) : bodies.length - 1;
+          if (idx < 0) throw new Error(bodies.length ? "ese cuerpo ya no existe" : "todavía no hay ningún cuerpo que partir");
+          const res = splitBody(bodies[idx].shape, f);
+          const b = bodies[idx];
+          bodies[idx] = { ...b, name: `${b.name} (parte 1)`, shape: res.a };
+          bodies.push({ id: f.id, name: `${b.name} (parte 2)`, shape: res.b, coarse: b.coarse });
+          if (res.pins) bodies.push({ id: `${f.id}-espigas`, name: "Espigas", shape: res.pins });
           break;
         }
         case "joint": {
@@ -1132,4 +1154,158 @@ function doCollide(m: Extract<WorkerIn, { kind: "collide" }>) {
   } catch (e) {
     post({ kind: "collide", seq: m.seq, clashes: [], error: msg(e) });
   }
+}
+
+// ---------------------------------------------------------------
+// Piezas de catálogo: la pieza real, o el hueco para meterla (con holgura)
+
+function cyl(r: number, z0: number, z1: number, x = 0, y = 0): Shape {
+  return R.makeCylinder(r, z1 - z0, [x, y, z0], [0, 0, 1]) as Shape;
+}
+function boxC(w: number, d: number, z0: number, z1: number, x = 0, y = 0): Shape {
+  return R.makeBox([x - w / 2, y - d / 2, z0], [x + w / 2, y + d / 2, z1]) as Shape;
+}
+const fuseAll = (list: Shape[]) => list.slice(1).reduce((a, b) => a.fuse(b) as Shape, list[0]);
+
+function catalogShape(p: CatalogPart, pocket: boolean, fit: number, length: number): Shape {
+  // el origen es la boca del hueco: el hueco sale 1 mm por fuera para no dejar una piel
+  const z0 = pocket ? -1 : 0;
+  switch (p.kind) {
+    case "bearing": {
+      if (pocket) return cyl((p.d! + fit) / 2, z0, p.h! + fit / 2);
+      return cyl(p.d! / 2, 0, p.h!).cut(cyl(p.id2! / 2, -1, p.h! + 1)) as Shape;
+    }
+    case "magnet":
+      return pocket ? cyl((p.d! + fit) / 2, z0, p.h! + fit / 2) : cyl(p.d! / 2, 0, p.h!);
+    case "insert":
+      // el agujero de un inserto va SIN holgura: se funde el plástico al meterlo
+      return pocket ? cyl(p.hole! / 2, z0, p.h! + 1) : cyl(p.d! / 2, 0, p.h!).cut(cyl((p.d! * 0.55) / 2, -1, p.h! + 1)) as Shape;
+    case "nut": {
+      const pts = hexagon(p.d! + (pocket ? fit : 0));
+      let pen = R.draw(pts[0]);
+      for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+      let d: R.Drawing = pen.close();
+      if (!pocket) d = d.cut(R.drawCircle(p.id2! / 2));
+      const hh = p.h! + (pocket ? fit / 2 + 1 : 0);
+      const sh = d.sketchOnPlane("XY").extrude(hh) as Shape;
+      return pocket ? sh.translate([0, 0, -1]) as Shape : sh;
+    }
+    case "profile": {
+      if (!(length > 0)) throw new Error("pon el largo del perfil");
+      if (pocket) return boxC(20 + fit, 20 + fit, z0, length + fit / 2);
+      // sección simplificada: cuadrado de 20 con una ranura de 6 en cada cara y agujero central
+      let s: R.Drawing = R.drawRectangle(20, 20);
+      for (const [x, y, w, hgt] of [[0, 8.25, 6, 3.5], [0, -8.25, 6, 3.5], [8.25, 0, 3.5, 6], [-8.25, 0, 3.5, 6]] as const) s = s.cut(R.drawRectangle(w, hgt).translate(x, y));
+      s = s.cut(R.drawCircle(2.1));
+      return s.sketchOnPlane("XY").extrude(length) as Shape;
+    }
+    case "servo": {
+      // SG90: el origen es la base de las orejetas, en el centro
+      if (pocket) return fuseAll([boxC(22.5 + fit, 11.8 + fit, -30, 0.5), cyl(0.9, -10, 0.5, 13.9, 0), cyl(0.9, -10, 0.5, -13.9, 0)]);
+      return fuseAll([
+        boxC(22.5, 11.8, -15.9, 6.8),
+        boxC(32.2, 11.8, 0, 2.5).cut(cyl(1, -1, 4, 13.9, 0)).cut(cyl(1, -1, 4, -13.9, 0)) as Shape,
+        cyl(5.9, 6.8, 10.8, 5.35, 0),
+        cyl(2.4, 10.8, 14, 5.35, 0),
+      ]);
+    }
+    case "stepper": {
+      // NEMA 17: el origen es la cara de montaje; el cuerpo va hacia abajo
+      const holes = [[15.5, 15.5], [-15.5, 15.5], [15.5, -15.5], [-15.5, -15.5]];
+      if (pocket) return fuseAll([cyl((22 + fit) / 2, -1, 40), ...holes.map(([x, y]) => cyl(1.7, -1, 40, x, y))]);
+      let body = boxC(42.3, 42.3, -40, 0);
+      for (const [x, y] of holes) body = body.cut(cyl(1.5, -4.5, 1, x, y)) as Shape;
+      return fuseAll([body, cyl(11, 0, 2), cyl(2.5, 0, 24)]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------
+// Partir un cuerpo por un plano, con espigas para volver a unirlo
+
+function splitBody(shape: Shape, f: Resolved<Extract<Feature, { type: "split" }>>) {
+  const ax = f.axis === "x" ? 0 : f.axis === "y" ? 1 : 2;
+  const [lo, hi] = shape.boundingBox.bounds as [Vec3, Vec3];
+  if (!(f.at > lo[ax] + 0.5 && f.at < hi[ax] - 0.5)) throw new Error(`el corte tiene que caer dentro de la pieza (entre ${round1(lo[ax])} y ${round1(hi[ax])} mm en ${f.axis.toUpperCase()})`);
+  const big = (from: number, to: number) => {
+    const a: Vec3 = [lo[0] - 10, lo[1] - 10, lo[2] - 10], b: Vec3 = [hi[0] + 10, hi[1] + 10, hi[2] + 10];
+    a[ax] = from; b[ax] = to;
+    return R.makeBox(a, b) as Shape;
+  };
+  let a = shape.intersect(big(lo[ax] - 10, f.at)) as Shape;
+  let b = shape.intersect(big(f.at, hi[ax] + 10)) as Shape;
+  let pins: Shape | null = null;
+  const dir: Vec3 = [0, 0, 0]; dir[ax] = 1;
+  if (f.pins !== "none") {
+    if (!(f.pinD > 0) || !(f.pinL > 2)) throw new Error("las espigas necesitan diámetro y un largo de más de 2 mm");
+    const n = Math.max(1, Math.min(8, Math.round(f.count)));
+    const pts = pinSpots(shape, ax, f.at, f.pinD / 2 + 1.2, f.pinL / 2 + 1, n);
+    if (!pts.length) throw new Error("no caben espigas en el corte: prueba más finas, más cortas o sin espigas");
+    const holeR = (f.pinD + f.fit) / 2, depth = f.pinL / 2 + 0.5;
+    const at = (p: Vec3, off: number): Vec3 => { const q: Vec3 = [...p]; q[ax] += off; return q; };
+    for (const p of pts) {
+      if (f.pins === "loose") {
+        // agujero en las dos mitades y espigas sueltas (se imprimen tumbadas o de pie)
+        a = a.cut(R.makeCylinder(holeR, depth, at(p, -depth), dir) as Shape) as Shape;
+        b = b.cut(R.makeCylinder(holeR, depth, p, dir) as Shape) as Shape;
+        const pin = R.makeCylinder(f.pinD / 2, f.pinL - 0.6, at(p, -(f.pinL - 0.6) / 2), dir) as Shape;
+        pins = pins ? pins.fuse(pin) as Shape : pin;
+      } else {
+        // espiga pegada a la parte 1, agujero en la parte 2
+        a = a.fuse(R.makeCylinder(f.pinD / 2, f.pinL / 2 - 0.3, p, dir) as Shape) as Shape;
+        b = b.cut(R.makeCylinder(holeR, depth, p, dir) as Shape) as Shape;
+      }
+    }
+  }
+  if (f.gap) {
+    const t: Vec3 = [0, 0, 0]; t[ax] = f.gap;
+    b = b.translate(t) as Shape;
+    if (pins) { const t2: Vec3 = [0, 0, 0]; t2[ax] = f.gap / 2; pins = pins.translate(t2) as Shape; }
+  }
+  return { a, b, pins };
+}
+
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+/** Sitios del corte donde cabe una espiga de radio r (con pared) y medio largo hl a cada lado */
+function pinSpots(shape: Shape, ax: number, at: number, r: number, hl: number, n: number): Vec3[] {
+  const [lo, hi] = shape.boundingBox.bounds as [Vec3, Vec3];
+  const [u, v] = [0, 1, 2].filter((k) => k !== ax);
+  const solidQ = new R.DistanceQuery(shape);
+  const facesQ = new R.DistanceQuery(R.makeCompound(shape.faces) as unknown as Shape);
+  const ok = (cu: number, cv: number) => {
+    for (const off of [-hl, 0, hl]) {
+      const p: Vec3 = [0, 0, 0]; p[ax] = at + off; p[u] = cu; p[v] = cv;
+      const vx = R.makeVertex(p);
+      if (solidQ.distanceTo(vx) > 1e-6) return false; // fuera de la pieza
+      if (facesQ.distanceTo(vx) < r) return false; // demasiado cerca de una pared
+    }
+    return true;
+  };
+  const N = 9, cand: [number, number][] = [];
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const cu = lo[u] + ((hi[u] - lo[u]) * (i + 0.5)) / N, cv = lo[v] + ((hi[v] - lo[v]) * (j + 0.5)) / N;
+    if (ok(cu, cv)) cand.push([cu, cv]);
+  }
+  if (!cand.length) return [];
+  // la primera, la más cercana al centro; luego, siempre la más lejana de las ya elegidas
+  const mid: [number, number] = [(lo[u] + hi[u]) / 2, (lo[v] + hi[v]) / 2];
+  const dist = (p: [number, number], q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+  const chosen: [number, number][] = [];
+  if (n === 1) chosen.push(cand.reduce((b, c) => (dist(c, mid) < dist(b, mid) ? c : b)));
+  else {
+    // dos o más: empieza por las dos más separadas
+    let best: [[number, number], [number, number]] = [cand[0], cand[0]];
+    for (const p of cand) for (const q of cand) if (dist(p, q) > dist(best[0], best[1])) best = [p, q];
+    chosen.push(best[0]);
+    if (best[1] !== best[0]) chosen.push(best[1]);
+    while (chosen.length < n) {
+      let far: [number, number] | null = null, fd = 2 * r;
+      for (const c of cand) { const d = Math.min(...chosen.map((x) => dist(x, c))); if (d > fd) { fd = d; far = c; } }
+      if (!far) break;
+      chosen.push(far);
+    }
+  }
+  solidQ.delete?.(); facesQ.delete?.();
+  return chosen.map(([cu, cv]) => { const p: Vec3 = [0, 0, 0]; p[ax] = at; p[u] = cu; p[v] = cv; return p; });
 }
