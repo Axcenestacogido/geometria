@@ -52,6 +52,7 @@ export class Viewport {
   private measureGroup = new THREE.Group();
   private checkGroup = new THREE.Group();
   private refGroup = new THREE.Group();
+  private clashGroup = new THREE.Group();
   private textures = new Map<string, THREE.Texture>();
   private grid!: THREE.GridHelper;
   private axes!: THREE.Group;
@@ -92,7 +93,7 @@ export class Viewport {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x445566, 1.4);
     hemi.position.set(0, 0, 1);
     this.light = new THREE.DirectionalLight(0xffffff, 1.6);
-    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup);
+    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.clashGroup);
     this.buildGrid(200);
     this.applyTheme();
 
@@ -279,7 +280,7 @@ export class Viewport {
 
   private applyClip() {
     const planes = this.clip();
-    for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup]) g.traverse((o) => {
+    for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup, this.clashGroup]) g.traverse((o) => {
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
       if (m) { m.clippingPlanes = planes; m.needsUpdate = true; }
       if (o.userData.cap) o.visible = !!this.section;
@@ -348,6 +349,21 @@ export class Viewport {
     const [x, y, z] = c.bed;
     const box = new THREE.Box3(new THREE.Vector3(-x / 2, -y / 2, 0), new THREE.Vector3(x / 2, y / 2, z));
     this.checkGroup.add(new THREE.Box3Helper(box, new THREE.Color(css("--muted"))));
+  }
+
+  /** Zonas donde dos cuerpos se meten uno en otro, en rojo y visibles a través de la pieza */
+  setClash(list: Float32Array[] | null) {
+    this.clearGroup(this.clashGroup);
+    if (!list) return;
+    for (const tris of list) {
+      if (!tris.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(tris, 3));
+      const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xe03131, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
+      mesh.renderOrder = 10;
+      this.clashGroup.add(mesh);
+    }
+    this.applyClip();
   }
 
   /** Imágenes de referencia de los bocetos, como láminas en su plano */
@@ -704,7 +720,7 @@ export class Viewport {
     cam.position.copy(center).addScaledVector(new THREE.Vector3(1, -1.25, 0.9).normalize(), dist);
     cam.lookAt(center);
     cam.updateProjectionMatrix();
-    const hide = [this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.grid, this.axes];
+    const hide = [this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.clashGroup, this.grid, this.axes];
     const was = hide.map((o) => o.visible);
     const gz = this.gizmo?.getHelper();
     const gzWas = gz?.visible;

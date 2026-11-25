@@ -280,6 +280,21 @@ export interface TransformFeature extends FeatureBase {
   copy: boolean;
 }
 
+/**
+ * Unión de un ensamblaje: mueve uno o varios cuerpos como lo haría una bisagra (girar
+ * alrededor de un eje) o una guía (deslizar a lo largo de él). «value» es la posición
+ * actual; min y max, hasta dónde llega.
+ */
+export interface JointFeature extends FeatureBase {
+  type: "joint";
+  kind: "hinge" | "slide";
+  bodies: string[];
+  axis: "x" | "-x" | "y" | "-y" | "z" | "-z";
+  /** un punto del eje (para la bisagra) */
+  x: Expr; y: Expr; z: Expr;
+  value: Expr; min: Expr; max: Expr;
+}
+
 /** Suma, resta o interseca cuerpos que ya existen */
 export interface CombineFeature extends FeatureBase {
   type: "combine";
@@ -317,6 +332,7 @@ export type Feature =
   | GearFeature
   | SpringFeature
   | TransformFeature
+  | JointFeature
   | CombineFeature
   | EdgeFeature
   | ShellFeature
@@ -404,7 +420,8 @@ export type WorkerIn =
   | { kind: "build"; seq: number; features: Resolved<Feature>[]; upTo?: string }
   | { kind: "file"; id: string; format: "step" | "stl"; data: ArrayBuffer }
   | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf"; colors?: Record<string, string> }
-  | { kind: "drawing"; seq: number; features: Resolved<Feature>[] };
+  | { kind: "drawing"; seq: number; features: Resolved<Feature>[] }
+  | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean };
 
 export type WorkerOut =
   | { kind: "ready" }
@@ -412,7 +429,17 @@ export type WorkerOut =
   | ({ kind: "built" } & BuildResult)
   | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string }
   | { kind: "file"; id: string; error?: string; triangles?: number }
-  | { kind: "drawing"; seq: number; views?: DrawingView[]; error?: string };
+  | { kind: "drawing"; seq: number; views?: DrawingView[]; error?: string }
+  | { kind: "collide"; seq: number; clashes: Clash[]; error?: string };
+
+/** Dos cuerpos que se meten uno en otro */
+export interface Clash {
+  a: string; b: string; nameA: string; nameB: string;
+  /** volumen que comparten (mm³) */
+  volume: number;
+  /** triángulos de la zona en común, para pintarla en rojo */
+  tris?: Float32Array;
+}
 
 /** Una vista de un plano 2D: trazos visibles y ocultos (SVG, en mm, Y hacia abajo) */
 export interface DrawingView {

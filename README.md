@@ -43,6 +43,8 @@ descargarlas como `.json` para pasarlas a otro).
 | **Cotas a tu elección** | En el plano 2D: horizontal, vertical, alineada, diámetro y radio. Se enganchan a esquinas, medios de línea y centros; se guardan con la pieza y salen en naranja si la pieza cambia y ya no coinciden. |
 | **Historial de versiones** | Archivo → Guardar versión (con nombre) y una automática cada 10 minutos de trabajo. Puedes volver a cualquiera o abrirla aparte. |
 | **Mis piezas** | Galería con miniatura de cada pieza, buscador, abrir, duplicar y borrar. |
+| **Unión (ensamblaje)** | Bisagra (gira alrededor de un eje) o guía (desliza), con deslizador entre mínimo y máximo. «Recorrer y buscar choques» la mueve de punta a punta y dice dónde choca algo. Plantilla «Caja con tapa abatible». |
+| **Choques entre cuerpos** | En la información de la pieza: dice qué cuerpos se meten uno en otro y pinta la zona en rojo. Tocarse no cuenta. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
