@@ -83,8 +83,64 @@ function boltNut(): Doc {
   };
 }
 
+function gears(): Doc {
+  const f: Feature[] = [
+    { id: "R1", type: "gear", name: "Rueda grande", x: E("0"), y: E("0"), z: E("0"), module: E("modulo"), teeth: E("dientes1"), thickness: E("grosor"), bore: E("eje"), fit: E("holgura"), angle: E("0"), op: "new" },
+    // a la distancia justa entre centros, y girada medio diente para que un diente caiga en un hueco
+    { id: "R2", type: "gear", name: "Rueda pequeña", x: E("modulo*(dientes1 + dientes2)/2"), y: E("0"), z: E("0"), module: E("modulo"), teeth: E("dientes2"), thickness: E("grosor"), bore: E("eje"), fit: E("holgura"), angle: E("180 + 180/dientes2"), op: "new" },
+  ];
+  return {
+    version: 1, name: "Pareja de engranajes",
+    variables: [
+      { name: "modulo", value: E("2") }, { name: "dientes1", value: E("30") }, { name: "dientes2", value: E("15") },
+      { name: "grosor", value: E("8") }, { name: "eje", value: E("5.2") }, { name: "holgura", value: E("0.2") },
+    ],
+    features: f,
+  };
+}
+
+function spring(): Doc {
+  return {
+    version: 1, name: "Muelle",
+    variables: [
+      { name: "diametro", value: E("20") }, { name: "hilo", value: E("1.6") }, { name: "paso", value: E("5") }, { name: "vueltas", value: E("6") },
+    ],
+    features: [
+      { id: "M", type: "spring", name: "Muelle", x: E("0"), y: E("0"), z: E("0"), diameter: E("diametro"), wire: E("hilo"), pitch: E("paso"), turns: E("vueltas"), flat: true, op: "new" },
+    ],
+  };
+}
+
+function tubeClip(): Doc {
+  const R = "(tubo/2 + grosor)";
+  const sk = id("s");
+  const f: Feature[] = [
+    { id: "C", type: "cylinder", name: "Anillo", x: E("0"), y: E("0"), z: E("0"), r: E(R), h: E("ancho"), op: "new" },
+    { id: id("b"), type: "box", name: "Base", x: E(`-(${R} + solapa)`), y: E(`-${R}`), z: E("0"), w: E(`2*(${R} + solapa)`), d: E("grosor"), h: E("ancho"), op: "add", target: "C" },
+    // un poco más estrecho que el tubo para que apriete
+    { id: id("h"), type: "cylinder", name: "Hueco del tubo", x: E("0"), y: E("0"), z: E("-1"), r: E("tubo/2 - apriete/2"), h: E("ancho + 2"), op: "cut", target: "C" },
+    { id: id("a"), type: "box", name: "Abertura", x: E("-abertura/2"), y: E("0"), z: E("-1"), w: E("abertura"), d: E("tubo"), h: E("ancho + 2"), op: "cut", target: "C" },
+    { id: sk, type: "sketch", name: "Tornillos (boceto)", plane: { kind: "std", name: "XZ", offset: E(R) } /* el plano XZ mira hacia -Y: desfase positivo = hacia la base */, profiles: [
+      { id: id("c"), kind: "circle", hole: false, cx: E(`-(${R} + solapa/2)`), cy: E("ancho/2"), r: E("tornillo/2") },
+      { id: id("c"), kind: "circle", hole: false, cx: E(`${R} + solapa/2`), cy: E("ancho/2"), r: E("tornillo/2") },
+    ] },
+    { id: id("e"), type: "extrude", name: "Agujeros de los tornillos", sketch: sk, distance: E("grosor*4"), symmetric: true, reverse: false, op: "cut", target: "C" },
+  ];
+  return {
+    version: 1, name: "Clip para tubo",
+    variables: [
+      { name: "tubo", value: E("20") }, { name: "grosor", value: E("2.5") }, { name: "ancho", value: E("12") },
+      { name: "apriete", value: E("0.4") }, { name: "abertura", value: E("tubo*0.8") }, { name: "solapa", value: E("10") }, { name: "tornillo", value: E("3.4") },
+    ],
+    features: f,
+  };
+}
+
 export const TEMPLATES: Template[] = [
   { id: "caja", name: "Caja con tapa a presión", info: "La tapa encaja por dentro con un labio. «holgura» decide lo que aprieta: 0,1 aprieta mucho, 0,3 entra suelta.", make: snapBox },
   { id: "bisagra", name: "Bisagra imprimible", info: "Se imprime ya montada, de una vez, tumbada como sale. «holgura» es el hueco entre piezas: 0,4 va bien en la Bambu con boquilla de 0,4.", make: hinge },
+  { id: "engranajes", name: "Pareja de engranajes", info: "Dos ruedas que engranan, ya colocadas. Cambia «dientes1» y «dientes2» y se recolocan solas. «eje» es el agujero (5,2 para un eje de 5 mm).", make: gears },
+  { id: "muelle", name: "Muelle", info: "Muelle de compresión con las puntas planas. Impreso en PETG o TPU aguanta mejor que en PLA; hilo de 1,6 mm o más.", make: spring },
+  { id: "clip", name: "Clip para tubo", info: "Abrazadera que se cierra a presión sobre un tubo y se atornilla. «apriete» es cuánto más estrecha que el tubo es (0,4 sujeta bien). Imprímela de pie, como sale.", make: tubeClip },
   { id: "tornillo", name: "Tornillo y tuerca M10", info: "Rosca métrica real. Imprímelos de pie; con «holgura» 0,3 la tuerca entra a mano.", make: boltNut },
 ];

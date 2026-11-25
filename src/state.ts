@@ -52,6 +52,8 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   box: "Caja",
   cylinder: "Cilindro",
   sphere: "Esfera",
+  gear: "Engranaje",
+  spring: "Muelle",
   fillet: "Redondeo",
   chamfer: "Chaflán",
   shell: "Vaciado",
@@ -67,7 +69,7 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
-  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", fillet: "◜", chamfer: "◸",
+  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", spring: "〰", fillet: "◜", chamfer: "◸",
   shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", layflat: "⤓", component: "❖",
 };
 
@@ -100,6 +102,10 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, x: "0", y: "0", z: "0", w: "20", d: "20", h: "20", op };
     case "cylinder":
       return { id, name, type, x: "0", y: "0", z: "0", r: "10", h: "20", op };
+    case "gear":
+      return { id, name, type, x: "0", y: "0", z: "0", module: "2", teeth: "20", thickness: "8", bore: "5", fit: "0.2", angle: "0", op };
+    case "spring":
+      return { id, name, type, x: "0", y: "0", z: "0", diameter: "16", wire: "1.6", pitch: "5", turns: "6", flat: true, op };
     case "sphere":
       return { id, name, type, x: "0", y: "0", z: "0", r: "10", op };
     case "fillet":
@@ -110,7 +116,7 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, thickness: "2", faces: [] };
     case "pattern": {
       // por defecto, repetir el último paso que crea o quita volumen
-      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "text", "sweep", "loft", "import", "component"].includes(f.type));
+      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "text", "sweep", "loft", "import", "component"].includes(f.type));
       return {
         id, name, type, kind: "linear", source: src?.id ?? "",
         axis: "x", count: "3", spacing: "10", axis2: "y", count2: "1", spacing2: "10",
@@ -146,6 +152,8 @@ const NUM_FIELDS: Record<string, string[]> = {
   box: ["x", "y", "z", "w", "d", "h"],
   cylinder: ["x", "y", "z", "r", "h"],
   sphere: ["x", "y", "z", "r"],
+  gear: ["x", "y", "z", "module", "teeth", "thickness", "bore", "fit", "angle"],
+  spring: ["x", "y", "z", "diameter", "wire", "pitch", "turns"],
   fillet: ["size"],
   chamfer: ["size"],
   shell: ["thickness"],

@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
+  TextFeature, TextFont, SweepFeature, GearFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -35,6 +35,9 @@ let build: BuildResult | null = null;
 let engineReady = false;
 let seq = 0;
 let lastBodiesKey = "";
+/** móvil: panel abierto abajo (añadir, pasos, props, vars) */
+let sheet: string | null = null;
+const isMobile = () => matchMedia("(max-width: 700px)").matches;
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 const h = (tag: string, attrs: Record<string, unknown> = {}, ...kids: (Node | string | null | undefined | false)[]) => {
@@ -68,7 +71,7 @@ $("#app").innerHTML = `
     <button data-a="new">Pieza nueva</button>
     <button data-a="open">Abrir pieza guardada…</button>
     <button data-a="example">Abrir el ejemplo</button>
-    <button data-a="templates">Plantillas…<small>Caja con tapa, bisagra, tornillo y tuerca</small></button>
+    <button data-a="templates">Plantillas…<small>Caja, bisagra, engranajes, muelle, clip, tornillo</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
     <button data-a="save-file">Descargar proyecto (.json)<small>Para guardarlo o pasarlo a otro equipo</small></button>
     <button data-a="load-file">Cargar proyecto (.json)…</button>
@@ -81,32 +84,36 @@ $("#app").innerHTML = `
 </header>
 <div class="main">
   <aside class="side">
-    <div class="section"><h3>Añadir</h3><div class="tools" id="tools"></div></div>
-    <div class="section grow"><h3>Pasos <span class="empty" id="buildtime"></span></h3><ul class="tree" id="tree"></ul></div>
-    <div class="section vars"><h3>Variables <button class="btn small" id="addvar">+ Añadir</button></h3><div id="vars"></div></div>
+    <div class="section" id="sec-add"><h3>Añadir</h3><div class="tools" id="tools"></div></div>
+    <div class="section grow" id="sec-steps"><h3>Pasos <span class="empty" id="buildtime"></span></h3><ul class="tree" id="tree"></ul></div>
+    <div class="section vars" id="sec-vars"><h3>Variables <button class="btn small" id="addvar">+ Añadir</button></h3><div id="vars"></div></div>
   </aside>
   <section class="view" id="view">
     <div class="viewbar">
-      <button class="btn small" id="measure" title="Medir distancias entre dos puntos">📏 Medir</button>
-      <button class="btn small" id="section" title="Cortar la pieza con un plano para ver el interior">✂ Corte</button>
-      <button class="btn small" id="drawing" title="Plano 2D con medidas, para imprimir o guardar en PDF">📐 Plano</button>
+      <div class="vb-tools">
+        <button class="btn small rbtn" id="measure" title="Medir distancias entre dos puntos"><i>📏</i><span>Medir</span></button>
+        <button class="btn small rbtn" id="section" title="Cortar la pieza con un plano para ver el interior"><i>✂</i><span>Corte</span></button>
+        <button class="btn small rbtn" id="drawing" title="Plano 2D con medidas, para imprimir o guardar en PDF"><i>📐</i><span>Plano</span></button>
+      </div>
       <span class="sep"></span>
-      <button class="btn small" data-v="iso" title="Vista 3D">3D</button>
-      <button class="btn small" id="persp" title="Cambia la vista 3D entre perspectiva e isométrica (paralela)">Perspectiva</button>
-      <span class="sep"></span>
-      <select class="btn small mobile-only" id="viewsel" title="Vistas">
-        <option value="">Vista…</option><option value="top">Arriba</option><option value="bottom">Abajo</option><option value="front">Frente</option>
-        <option value="back">Detrás</option><option value="left">Izquierda</option><option value="right">Derecha</option>
-      </select>
-      <span class="desk-only views"><button class="btn small" data-v="top">Arriba</button>
-      <button class="btn small" data-v="bottom">Abajo</button>
-      <button class="btn small" data-v="front">Frente</button>
-      <button class="btn small" data-v="back">Detrás</button>
-      <button class="btn small" data-v="left">Izquierda</button>
-      <button class="btn small" data-v="right">Derecha</button></span>
-      <span class="sep"></span>
-      <button class="btn small" data-v="fit">Encajar</button>
+      <div class="vb-views">
+        <button class="btn small rbtn" data-v="fit" title="Encajar la pieza en la pantalla"><i>⛶</i><span>Encajar</span></button>
+        <button class="btn small rbtn" data-v="iso" title="Vista 3D"><i>◈</i><span>3D</span></button>
+        <button class="btn small rbtn" id="persp" title="Cambia la vista 3D entre perspectiva e isométrica (paralela)"><i>⟁</i><span id="persp-label">Perspectiva</span></button>
+        <label class="btn small rbtn mobile-only viewpick" title="Vistas"><i>⊞</i><span>Vistas</span>
+          <select id="viewsel" aria-label="Vistas">
+            <option value="">Vista…</option><option value="top">Arriba</option><option value="bottom">Abajo</option><option value="front">Frente</option>
+            <option value="back">Detrás</option><option value="left">Izquierda</option><option value="right">Derecha</option>
+          </select></label>
+        <span class="desk-only views"><span class="sep"></span><button class="btn small" data-v="top">Arriba</button>
+        <button class="btn small" data-v="bottom">Abajo</button>
+        <button class="btn small" data-v="front">Frente</button>
+        <button class="btn small" data-v="back">Detrás</button>
+        <button class="btn small" data-v="left">Izquierda</button>
+        <button class="btn small" data-v="right">Derecha</button></span>
+      </div>
     </div>
+    <div class="undo-float"><button class="btn" id="undo-m" title="Deshacer">↶</button><button class="btn" id="redo-m" title="Rehacer">↷</button></div>
     <div class="banner" id="banner" hidden></div>
     <div class="secpanel" id="secpanel" hidden></div>
     <div class="sketch" id="sketch">
@@ -115,8 +122,14 @@ $("#app").innerHTML = `
     </div>
     <div class="loading" id="loading">Cargando el motor geométrico…</div>
   </section>
-  <aside class="side right" id="props"></aside>
+  <aside class="side right"><div class="props-in" id="props"></div></aside>
 </div>
+<nav class="dock" id="dock" aria-label="Paneles">
+  <button data-sheet="add"><i>＋</i><span>Añadir</span></button>
+  <button data-sheet="steps"><i>☰</i><span>Pasos</span></button>
+  <button data-sheet="props"><i>✎</i><span id="dock-props">Tu pieza</span></button>
+  <button data-sheet="vars"><i>𝑥</i><span>Variables</span></button>
+</nav>
 <footer class="status"><span id="st-engine">Motor: cargando</span><span id="st-msg"></span><span class="spacer"></span><span>Unidades: mm</span></footer>
 <dialog id="dlg"></dialog>
 <input type="file" id="file" accept=".json,application/json" hidden />
@@ -264,6 +277,8 @@ function undoRedo(which: "undo" | "redo") {
 function renderUndo() {
   ($("#undo") as HTMLButtonElement).disabled = !history.canUndo;
   ($("#redo") as HTMLButtonElement).disabled = !history.canRedo;
+  ($("#undo-m") as HTMLButtonElement).disabled = !history.canUndo;
+  ($("#redo-m") as HTMLButtonElement).disabled = !history.canRedo;
 }
 
 // ======================================================================
@@ -273,6 +288,7 @@ function renderUndo() {
 const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
+  { type: "gear" }, { type: "spring" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
   { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
   { type: "component" }, { type: "layflat" },
@@ -288,6 +304,8 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   import: "Traer una pieza STEP o STL de otro programa",
   component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
+  gear: "Rueda dentada recta: eliges el módulo y los dientes",
+  spring: "Muelle de compresión: diámetro, hilo, paso y vueltas",
 };
 
 function renderTools() {
@@ -332,12 +350,27 @@ function setActive(id: string | null) {
   renderProps();
   renderBanner();
   rebuild();
-  // en el móvil, llevarte a lo que acabas de abrir
-  if (id && matchMedia("(max-width: 700px)").matches) {
-    if (f?.type === "sketch") window.scrollTo({ top: 0, behavior: "smooth" });
-    else $("#props").scrollIntoView({ behavior: "smooth", block: "start" });
+  // en el móvil: al editar un paso se abre su panel; en un boceto, la pantalla entera para dibujar
+  document.body.classList.toggle("sketching", f?.type === "sketch");
+  $("#dock-props").textContent = f ? "Editar" : "Tu pieza";
+  if (isMobile()) {
+    if (f?.type === "sketch") setSheet(null);
+    else if (f) setSheet("props");
+    else if (sheet === "props") setSheet(null);
   }
 }
+
+// ---------- móvil: paneles que suben desde abajo ----------
+function setSheet(name: string | null) {
+  sheet = name;
+  for (const n of ["add", "steps", "props", "vars"]) document.body.classList.toggle(`sheet-${n}`, n === name);
+  document.body.classList.toggle("sheet-open", !!name);
+  document.querySelectorAll<HTMLElement>("#dock [data-sheet]").forEach((b) => b.classList.toggle("on", b.dataset.sheet === name));
+  if (name) {
+    (name === "props" ? $("#props") : $(`#sec-${name}`)).scrollTop = 0;
+  }
+}
+document.querySelectorAll<HTMLElement>("#dock [data-sheet]").forEach((b) => b.addEventListener("click", () => setSheet(sheet === b.dataset.sheet ? null : b.dataset.sheet!)));
 
 function renderTree() {
   renderTools();
@@ -641,8 +674,9 @@ function renderProps() {
       h("div", { class: "msg info" }, "2. Conviértelo en sólido con ", h("b", {}, "Extruir"), " o ", h("b", {}, "Revolución"), "."),
       h("div", { class: "msg info" }, "3. Suma o resta piezas, redondea aristas y exporta a 3MF para imprimir."),
       h("div", { class: "msg info" }, "Cada paso queda en la lista: haz clic en uno para cambiar sus medidas y todo se recalcula."),
-      h("h3", { class: "mt" }, "Ratón"),
-      h("div", { class: "empty" }, "Botón izquierdo: girar · derecho: desplazar · rueda: zoom"),
+      ...(sketcher.coarse
+        ? [h("h3", { class: "mt" }, "Con el dedo"), h("div", { class: "empty" }, "Un dedo: girar · dos dedos: zoom y desplazar · abajo tienes Añadir, Pasos, Editar y Variables")]
+        : [h("h3", { class: "mt" }, "Ratón"), h("div", { class: "empty" }, "Botón izquierdo: girar · derecho: desplazar · rueda: zoom")]),
     ));
     return;
   }
@@ -683,6 +717,36 @@ function renderProps() {
         if (f.type === "cylinder") sec.append(exprField("Alto (Z)", () => f.h, (v) => (f.h = v), k("h")));
       }
       sec.append(h("h3", { class: "mt" }, f.type === "box" ? "Esquina" : "Centro de la base"));
+      sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+      sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+      sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+      sec.append(...opFields(f));
+      break;
+    }
+    case "gear": {
+      sec.append(exprField("Dientes", () => f.teeth, (v) => (f.teeth = v), k("teeth")));
+      sec.append(exprField("Módulo", () => f.module, (v) => (f.module = v), k("module"), { hint: "tamaño del diente; dos ruedas engranan si tienen el mismo" }));
+      sec.append(exprField("Grosor", () => f.thickness, (v) => (f.thickness = v), k("thickness")));
+      sec.append(exprField("Agujero del eje", () => f.bore, (v) => (f.bore = v), k("bore"), { hint: "diámetro; 0 = sin agujero" }));
+      sec.append(exprField("Holgura", () => f.fit, (v) => (f.fit = v), k("fit"), { hint: "juego entre dientes; 0,2 va bien impreso" }));
+      sec.append(exprField("Giro", () => f.angle, (v) => (f.angle = v), k("angle"), { unit: "°" }));
+      const r = resolved.features.find((x) => x.id === f.id) as Resolved<GearFeature> | undefined;
+      if (r && r.module > 0 && r.teeth > 0) sec.append(h("div", { class: "msg info" },
+        `Diámetro primitivo ${fmtEs(r.module * r.teeth, 2)} mm · exterior ${fmtEs(r.module * (r.teeth + 2), 2)} mm. Para que engrane con otra rueda de N dientes, sepáralas ${fmtEs(r.module / 2, 2)} × (${r.teeth} + N) mm entre centros.`));
+      sec.append(h("h3", { class: "mt" }, "Centro de la base"));
+      sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+      sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+      sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+      sec.append(...opFields(f));
+      break;
+    }
+    case "spring": {
+      sec.append(exprField("Diámetro exterior", () => f.diameter, (v) => (f.diameter = v), k("diameter")));
+      sec.append(exprField("Hilo", () => f.wire, (v) => (f.wire = v), k("wire"), { hint: "grosor del alambre; impreso, 1,2 mm o más" }));
+      sec.append(exprField("Paso", () => f.pitch, (v) => (f.pitch = v), k("pitch"), { hint: "distancia entre vueltas" }));
+      sec.append(exprField("Vueltas", () => f.turns, (v) => (f.turns = v), k("turns")));
+      sec.append(checkField("Puntas planas (apoya bien)", f.flat, (v) => (f.flat = v)));
+      sec.append(h("h3", { class: "mt" }, "Centro de la base"));
       sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
       sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
       sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
@@ -739,7 +803,7 @@ function renderProps() {
 function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
   const k = (field: string) => `${f.id}:${field}`;
   const idx = doc.features.indexOf(f);
-  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "pattern", "text", "sweep", "loft", "import"].includes(x.type));
+  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "pattern", "text", "sweep", "loft", "import"].includes(x.type));
   sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["path", "A lo largo de un camino"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
   sec.append(selectField("Repetir", f.source, [["", "El cuerpo entero"], ...sources.map((s) => [s.id, s.name] as [string, string])], (v) => (f.source = v)));
   const axes: [string, string][] = [["x", "X (rojo)"], ["y", "Y (verde)"], ["z", "Z (azul)"]];
@@ -1530,7 +1594,8 @@ document.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.addEventList
 const PERSP_KEY = "geometria:perspectiva";
 try { viewport.perspective3d = localStorage.getItem(PERSP_KEY) !== "no"; } catch { /* sin almacenamiento */ }
 function renderPerspBtn() {
-  $("#persp").textContent = viewport.perspective3d ? "Perspectiva" : "Isométrica";
+  const short = isMobile();
+  $("#persp-label").textContent = viewport.perspective3d ? (short ? "Persp." : "Perspectiva") : (short ? "Isom." : "Isométrica");
 }
 $("#persp").addEventListener("click", () => {
   viewport.setPerspective3d(!viewport.perspective3d);
@@ -1561,6 +1626,8 @@ $("#measure").addEventListener("click", () => (measuring ? stopMeasure() : start
 viewport.events.onMeasure = () => renderBanner();
 $("#undo").addEventListener("click", () => undoRedo("undo"));
 $("#redo").addEventListener("click", () => undoRedo("redo"));
+$("#undo-m").addEventListener("click", () => undoRedo("undo"));
+$("#redo-m").addEventListener("click", () => undoRedo("redo"));
 $("#addvar").addEventListener("click", () => {
   let i = 1;
   while (doc.variables.some((v) => v.name === `medida${i}`)) i++;

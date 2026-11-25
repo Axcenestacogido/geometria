@@ -16,6 +16,8 @@ descargarlas como `.json` para pasarlas a otro).
 | **Extruir** | Da grosor al boceto. Hacia un lado, al contrario o simétrico. |
 | **Revolución** | Gira el boceto alrededor de su eje X o Y (jarrones, pomos, arandelas…). |
 | **Caja, Cilindro, Esfera** | Formas básicas con medidas y posición. |
+| **Engranaje** | Rueda dentada recta de evolvente (20°): dientes, módulo, grosor, agujero del eje y holgura. Te dice a qué distancia poner otra rueda para que engrane. |
+| **Muelle** | Muelle de compresión: diámetro, hilo, paso y vueltas, con puntas planas para que apoye. |
 | **Sumar / Restar / Intersecar** | Cada sólido puede crear un cuerpo nuevo o combinarse con uno existente. Al restar desde una cara, va hacia dentro de la pieza. |
 | **Redondeo y Chaflán** | Eliges las aristas con un clic en la vista 3D. |
 | **Vaciado** | Convierte el sólido en una carcasa; eliges con un clic las caras que quedan abiertas. |
@@ -32,12 +34,12 @@ descargarlas como `.json` para pasarlas a otro).
 | **Redondeo/Chaflán por caras** | Elige caras enteras (todas sus aristas a la vez) o aristas sueltas, cada una con su propia medida si quieres. |
 | **Apoyar** | Gira la pieza para que la cara elegida (o la plana más grande) quede sobre la cama. |
 | **Comprobar para imprimir** | En «Tu pieza»: si cabe en la cama, voladizos de más de 45° (en rojo) y paredes finas (en morado). La cama y los límites se ajustan. |
-| **Plantillas** | Caja con tapa a presión, bisagra imprimible ya montada y tornillo con tuerca M10, todas con variables y holguras. |
+| **Plantillas** | Caja con tapa a presión, bisagra imprimible ya montada, pareja de engranajes, muelle, clip para tubo y tornillo con tuerca M10, todas con variables y holguras. |
 | **Pieza** | Mete dentro una de tus piezas guardadas (copia), cambiando sus variables, posición y giro. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
-| **Móvil** | Funciona en el móvil: la vista se queda arriba, el boceto se mueve y se amplía con dos dedos, y los puntos son más grandes para el dedo. |
+| **Móvil** | La vista 3D ocupa toda la pantalla, con botones flotantes a los lados (medir, corte, plano, vistas) y un dock abajo (Añadir, Pasos, Editar, Variables) que abre paneles desde abajo. En el boceto, la barra de herramientas va abajo y se usa con dos dedos para zoom y mover. |
 | **Medir** | Distancia entre vértices, aristas o caras, con X, Y, Z por separado. |
 | **Tu pieza** | Tamaño, volumen, peso en PLA/PETG y metros de filamento. |
 | **Variables** | `grosor = 3` y luego escribes `grosor * 2` en cualquier medida. Admite `+ - * / ^ ( )`, `sqrt`, `sin`, `cos`, `tan` (en grados), `abs`, `round` y `pi`. |
