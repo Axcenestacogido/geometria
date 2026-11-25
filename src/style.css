@@ -404,3 +404,19 @@ kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 
 .keys table { width: 100%; border-collapse: collapse; }
 .keys td:first-child { width: 1%; white-space: nowrap; padding-right: 12px; }
 dialog:has(.keys) { width: min(860px, calc(100vw - 32px)); }
+
+/* menú del botón derecho */
+.ctxmenu { position: fixed; z-index: 60; min-width: 210px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 5px; box-shadow: 0 8px 24px #0003; display: flex; flex-direction: column; font-size: 13px; }
+.ctxmenu .menu-h { padding: 4px 8px 6px; font-weight: 600; color: var(--muted, inherit); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.ctxmenu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; width: auto; }
+.ctx-i { display: flex; justify-content: space-between; align-items: center; gap: 16px; border: 0; background: none; color: var(--text); font: inherit; text-align: left; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.ctx-i:hover, .ctx-i:focus-visible { background: var(--hover-bg, #8881); outline: none; }
+.ctx-i.danger { color: #c8402f; }
+.ctx-i kbd { font-size: 11px; opacity: .7; }
+.ctx-colors { display: flex; gap: 5px; padding: 6px 8px; flex-wrap: wrap; }
+.ctx-sw { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); cursor: pointer; padding: 0; }
+.ctx-sw.none { background: var(--panel); color: var(--text); font-size: 12px; line-height: 1; }
+.ctx-sw:hover { transform: scale(1.15); }
+.hidechip { top: 10px; bottom: auto; left: 10px; font-size: 13px; }
+@media (max-width: 700px) { .hidechip { top: 60px; bottom: auto; } }
+.ctx-sw.on { outline: 2px solid var(--accent); outline-offset: 1px; }
