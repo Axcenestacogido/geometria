@@ -47,6 +47,8 @@ interface FeatureBase {
   name: string;
   /** Paso apagado: se salta al reconstruir */
   off?: boolean;
+  /** Carpeta de la lista de pasos (solo para ordenar la lista: no cambia la pieza) */
+  group?: string;
 }
 
 /** Un tramo de una polilínea: perfil `p`, tramo que sale del punto `i` */
@@ -155,6 +157,17 @@ export interface EdgeFeature extends FeatureBase {
   sizes?: Expr[];
   /** Un punto sobre cada cara elegida: se redondean todas sus aristas */
   faces?: Vec3[];
+}
+
+/** Empujar o tirar de una cara plana: la pieza crece (o se hunde) esa distancia */
+export interface PushPullFeature extends FeatureBase {
+  type: "pushpull";
+  /** un punto sobre la cara (null = aún sin elegir) */
+  face: Vec3 | null;
+  /** hacia fuera de la pieza en ese punto */
+  normal: Vec3;
+  /** mm: positivo = crece, negativo = se hunde */
+  distance: Expr;
 }
 
 /** Vaciado: deja paredes de `thickness` y quita las caras elegidas */
@@ -402,6 +415,7 @@ export type Feature =
   | CombineFeature
   | EdgeFeature
   | ShellFeature
+  | PushPullFeature
   | PatternFeature
   | HoleFeature
   | RodFeature
@@ -434,6 +448,8 @@ export interface Doc {
   bim?: Record<string, BodyInfo>;
   /** Familia: la misma pieza en varios tamaños */
   family?: Family;
+  /** carpetas de la lista de pasos que están plegadas */
+  folded?: string[];
 }
 
 /** Tabla de tamaños: qué variables cambian y sus valores en cada fila */

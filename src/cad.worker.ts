@@ -440,6 +440,27 @@ function applyShell(bodies: Body[], f: Extract<RF, { type: "shell" }>) {
   }
 }
 
+/** Empuja (o hunde) una cara plana: extruye la cara y la suma o la resta de su cuerpo */
+function pushPull(bodies: Body[], f: Extract<RF, { type: "pushpull" }>) {
+  if (!f.face) throw new Error("haz clic en la cara plana que quieres empujar");
+  if (!f.distance) throw new Error("la distancia no puede ser 0");
+  let pick: { bi: number; face: R.Face; d: number } | null = null;
+  bodies.forEach((b, bi) => {
+    const n = nearestFace(b.shape, f.face as Vec3);
+    if (n && (!pick || n.d < pick.d)) pick = { bi, face: n.face, d: n.d };
+  });
+  const k = pick as { bi: number; face: R.Face; d: number } | null;
+  if (!k || k.d > EDGE_TOL) throw new Error("no encuentro esa cara: puede que un paso anterior la haya cambiado");
+  if (k.face.geomType !== "PLANE") throw new Error("solo se pueden empujar caras planas");
+  const nv = k.face.normalAt();
+  let n: Vec3 = [nv.x, nv.y, nv.z];
+  // la normal de OpenCascade puede venir al revés: manda la que se vio en pantalla (hacia fuera)
+  if (n[0] * f.normal[0] + n[1] * f.normal[1] + n[2] * f.normal[2] < 0) n = [-n[0], -n[1], -n[2]];
+  const b = bodies[k.bi];
+  const tool = R.basicFaceExtrusion(k.face, new R.Vector(vscale(n, f.distance))) as unknown as Shape;
+  b.shape = (f.distance > 0 ? b.shape.fuse(tool) : b.shape.cut(tool)) as Shape;
+}
+
 /** Gira una pieza construida a lo largo de +Z para que apunte en `dir` y la lleva a `at` */
 function placeAlong(shape: Shape, dir: Vec3, at: Vec3): Shape {
   const z: Vec3 = [0, 0, 1];
@@ -1091,6 +1112,9 @@ function runFeatures(features: RF[], upTo?: string) {
         }
         case "shell":
           applyShell(bodies, f);
+          break;
+        case "pushpull":
+          pushPull(bodies, f);
           break;
         case "hole":
         case "rod": {
