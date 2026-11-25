@@ -13,7 +13,7 @@ import { catalogPart, hexagon, type CatalogPart } from "./catalog";
 import { logoParts, heightGrid, type Gray, type P2 } from "./relief";
 /** pasos cuyo sólido conviene dibujar con menos detalle */
 const coarseIds = new Set<string>();
-import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash } from "./types";
+import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash, ComparePart } from "./types";
 import interRegular from "./fonts/Inter-Regular.otf?url";
 import interBold from "./fonts/Inter-Bold.otf?url";
 import monoBold from "./fonts/JetBrainsMono-Bold.ttf?url";
@@ -60,6 +60,7 @@ function pump() {
       else if (m.kind === "export") doExport(m);
       else if (m.kind === "drawing") doDrawing(m);
       else if (m.kind === "collide") doCollide(m);
+      else if (m.kind === "compare") doCompare(m);
     }
   } finally {
     busy = false;
@@ -1357,6 +1358,41 @@ function doCollide(m: Extract<WorkerIn, { kind: "collide" }>) {
     post({ kind: "collide", seq: m.seq, clashes }, clashes.flatMap((c) => (c.tris ? [c.tris.buffer] : [])));
   } catch (e) {
     post({ kind: "collide", seq: m.seq, clashes: [], error: msg(e) });
+  }
+}
+
+/**
+ * Compara dos versiones: lo que tienen en común, lo que ha crecido (está en B y no en A)
+ * y lo que ha desaparecido (estaba en A y ya no está en B).
+ */
+function doCompare(m: Extract<WorkerIn, { kind: "compare" }>) {
+  try {
+    const solid = (features: RF[]): Shape | null => {
+      const { bodies } = runFeatures(features);
+      return bodies.length ? fuseAll(bodies.map((b) => b.shape)) : null;
+    };
+    const A = solid(m.a), B = solid(m.b);
+    if (!A && !B) throw new Error("las dos versiones están vacías");
+    const empty: ComparePart = { vertices: new Float32Array(0), normals: new Float32Array(0), triangles: new Uint32Array(0), volume: 0 };
+    const part = (s: Shape | null): ComparePart => {
+      if (!s) return empty;
+      const volume = safeNum(() => R.measureVolume(s));
+      if (!(volume > 1e-3)) return empty;
+      const mm = s.mesh({ tolerance: 0.05, angularTolerance: 0.25 });
+      return { vertices: new Float32Array(mm.vertices), normals: new Float32Array(mm.normals), triangles: new Uint32Array(mm.triangles), volume };
+    };
+    const parts = {
+      same: part(A && B ? (A.intersect(B) as Shape) : null),
+      added: part(!A ? B : B ? (B.cut(A) as Shape) : null),
+      removed: part(!B ? A : A ? (A.cut(B) as Shape) : null),
+    };
+    const transfer = Object.values(parts).flatMap((p) => [p.vertices.buffer, p.normals.buffer, p.triangles.buffer]);
+    post({ kind: "compare", seq: m.seq, parts }, transfer);
+  } catch (e) {
+    post({ kind: "compare", seq: m.seq, error: msg(e) });
+  } finally {
+    // la próxima reconstrucción normal no debe aprovechar pasos de otra versión
+    stepCache = [];
   }
 }
 

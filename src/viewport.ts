@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import type { BodyMesh, Vec3 } from "./types";
+import type { BodyMesh, ComparePart, Vec3 } from "./types";
 import type { Basis } from "./geom";
 import { circleFrom, faceKind, type Circle3, type FaceKind } from "./measure";
 
@@ -69,6 +69,7 @@ export class Viewport {
   private checkGroup = new THREE.Group();
   private refGroup = new THREE.Group();
   private clashGroup = new THREE.Group();
+  private compareGroup = new THREE.Group();
   private textures = new Map<string, THREE.Texture>();
   private grid!: THREE.GridHelper;
   private axes!: THREE.Group;
@@ -110,7 +111,7 @@ export class Viewport {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x445566, 1.4);
     hemi.position.set(0, 0, 1);
     this.light = new THREE.DirectionalLight(0xffffff, 1.6);
-    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.clashGroup);
+    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.clashGroup, this.compareGroup);
     this.buildGrid(200);
     this.applyTheme();
 
@@ -466,7 +467,7 @@ export class Viewport {
 
   private applyClip() {
     const planes = this.clip();
-    for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup, this.clashGroup]) g.traverse((o) => {
+    for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup, this.clashGroup, this.compareGroup]) g.traverse((o) => {
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
       if (m) { m.clippingPlanes = planes; m.needsUpdate = true; }
       if (o.userData.cap) o.visible = !!this.section;
@@ -553,6 +554,32 @@ export class Viewport {
       mesh.renderOrder = 10;
       this.clashGroup.add(mesh);
     }
+    this.applyClip();
+  }
+
+  /**
+   * Comparar dos versiones: en gris lo que no cambia (transparente), en verde lo que ha crecido
+   * y en rojo lo que ha desaparecido. Mientras tanto la pieza normal no se ve. null = volver a la normal.
+   */
+  setCompare(parts: Record<"same" | "added" | "removed", ComparePart> | null) {
+    this.clearGroup(this.compareGroup);
+    this.bodiesGroup.visible = !parts;
+    if (!parts) return;
+    const add = (p: ComparePart, color: number, opacity: number, order: number) => {
+      if (!p.triangles.length) return;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(p.vertices, 3));
+      g.setAttribute("normal", new THREE.BufferAttribute(p.normals, 3));
+      g.setIndex(new THREE.BufferAttribute(p.triangles, 1));
+      const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+        color, metalness: 0.05, roughness: 0.6, transparent: opacity < 1, opacity, depthWrite: opacity >= 1, side: THREE.DoubleSide,
+      }));
+      mesh.renderOrder = order;
+      this.compareGroup.add(mesh);
+    };
+    add(parts.added, 0x2f9e44, 1, 1);
+    add(parts.removed, 0xe03131, 0.85, 2);
+    add(parts.same, 0x9aa5b1, 0.3, 3);
     this.applyClip();
   }
 

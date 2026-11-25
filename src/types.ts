@@ -505,6 +505,9 @@ export type Resolved<T> = T extends string
       ? { [K in keyof T]: Resolved<T[K]> }
       : T;
 
+/** Un trozo de la comparación de dos versiones (malla y volumen en mm³) */
+export interface ComparePart { vertices: Float32Array; normals: Float32Array; triangles: Uint32Array; volume: number }
+
 export interface BodyMesh {
   id: string;
   name: string;
@@ -537,7 +540,8 @@ export type WorkerIn =
   | { kind: "gray"; id: string; w: number; h: number; data: Uint8Array }
   | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf"; colors?: Record<string, string> }
   | { kind: "drawing"; seq: number; features: Resolved<Feature>[]; section?: SheetSection }
-  | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean };
+  | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean }
+  | { kind: "compare"; seq: number; a: Resolved<Feature>[]; b: Resolved<Feature>[] };
 
 export type WorkerOut =
   | { kind: "ready" }
@@ -546,7 +550,8 @@ export type WorkerOut =
   | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string }
   | { kind: "file"; id: string; error?: string; triangles?: number }
   | { kind: "drawing"; seq: number; views?: DrawingView[]; error?: string }
-  | { kind: "collide"; seq: number; clashes: Clash[]; error?: string };
+  | { kind: "collide"; seq: number; clashes: Clash[]; error?: string }
+  | { kind: "compare"; seq: number; parts?: Record<"same" | "added" | "removed", ComparePart>; error?: string };
 
 /** Dos cuerpos que se meten uno en otro */
 export interface Clash {

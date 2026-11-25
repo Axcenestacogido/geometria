@@ -88,6 +88,7 @@ $("#app").innerHTML = `
     <div class="menu-h">Versiones</div>
     <button data-a="version">Guardar versión…<kbd>Ctrl S</kbd><small>Una foto de cómo está ahora, con nombre</small></button>
     <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
+    <button data-a="compare">Comparar versiones…<small>Ver en color qué ha crecido y qué ha desaparecido</small></button>
     <div class="menu-h">Ajustes de la pieza</div>
     <button data-a="family">Familia de tamaños…<small>La misma pieza en varias medidas; exportarlas todas</small></button>
     <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
@@ -185,6 +186,10 @@ const worker = new Worker(new URL("./cad.worker.ts", import.meta.url), { type: "
 const exportWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "exported" }>) => void>();
 const collideWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "collide" }>) => void>();
 let collideSeq = 0;
+const compareWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "compare" }>) => void>();
+/** Comparación en pantalla: nombres de las dos versiones y volúmenes (mm³) que han cambiado */
+let comparing: { a: string; b: string; added: number; removed: number } | null = null;
+let compareSeq = 0;
 /** Pregunta al motor qué cuerpos se meten unos en otros con estos pasos */
 function askCollide(features: Resolved<Feature>[], mesh: boolean) {
   return new Promise<Extract<WorkerOut, { kind: "collide" }>>((res) => {
@@ -235,6 +240,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   } else if (m.kind === "collide") {
     collideWaiters.get(m.seq)?.(m);
     collideWaiters.delete(m.seq);
+  } else if (m.kind === "compare") {
+    compareWaiters.get(m.seq)?.(m);
+    compareWaiters.delete(m.seq);
   } else if (m.kind === "drawing") {
     drawingWaiters.get(m.seq)?.(m);
     drawingWaiters.delete(m.seq);
@@ -356,6 +364,7 @@ function scheduleThumb() {
 }
 
 function setDoc(d: Doc, id = docId, resetHistory = true) {
+  if (comparing) stopCompare();
   doc = d;
   docId = id;
   active = null;
@@ -2375,6 +2384,14 @@ function renderBanner() {
     b.hidden = false;
     b.innerHTML = "";
     b.append("Haz clic en una cara plana de la pieza", h("button", { class: "btn small", onclick: () => { pickingFace = false; viewport.pickMode = "none"; if (f?.type === "sketch") $("#sketch").classList.add("on"); renderBanner(); } }, "Cancelar"));
+  } else if (comparing) {
+    b.hidden = false;
+    b.innerHTML = "";
+    const c = comparing, cm3 = (v: number) => fmtEs(v / 1000, v < 1000 ? 2 : 1) + " cm³";
+    const swatch = (cls: string) => h("i", { class: `cmp-sw ${cls}` });
+    if (c.added < 1e-3 && c.removed < 1e-3) b.append(`«${c.a}» y «${c.b}» son iguales por fuera`);
+    else b.append(h("span", {}, `«${c.a}» → «${c.b}»: `, swatch("add"), ` ha crecido ${cm3(c.added)}  ·  `, swatch("rem"), ` ha desaparecido ${cm3(c.removed)}`));
+    b.append(h("button", { class: "btn small", onclick: stopCompare }, "Terminar"));
   } else if (measuring) {
     b.hidden = false;
     b.innerHTML = "";
@@ -2501,7 +2518,7 @@ const nn = (...xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement =>
 function closeMenu() { document.querySelectorAll(".ctxmenu").forEach((x) => x.remove()); }
 function bodyMenu(id: string | null, x: number, y: number, face: { point: Vec3; normal: Vec3 } | null = null) {
   closeMenu();
-  if (active || explode || measuring) return;
+  if (active || explode || measuring || comparing) return;
   const b = id ? build?.bodies.find((q) => q.id === id) : undefined;
   const item = (label: string, key: string, run: () => void, cls = "") =>
     h("button", { class: `ctx-i ${cls}`, onclick: () => { closeMenu(); run(); } }, h("span", {}, label), key ? h("kbd", {}, key) : null);
@@ -2577,7 +2594,7 @@ function labelFace(bodyId: string, face: { point: Vec3; normal: Vec3 }) {
 }
 
 viewport.events.onBodyClick = (id) => {
-  if (active || explode || measuring) return;
+  if (active || explode || measuring || comparing) return;
   selBody = id;
   renderSelPanel();
 };
@@ -3265,6 +3282,7 @@ function historyDialog() {
         dlg.close();
         toast(`Has vuelto a «${v.name}»`);
       } }, "Volver a esta"),
+      same ? null : h("button", { class: "btn small", title: "Ver en color qué ha cambiado desde esta versión", onclick: () => { dlg.close(); startCompare(String(v.t), "now"); } }, "Comparar"),
       h("button", { class: "btn small", onclick: () => {
         const d = JSON.parse(v.doc) as Doc;
         d.name = `${d.name} (${v.name})`;
@@ -3297,6 +3315,7 @@ function fileAction(a: string) {
   else if (a === "open") openDialog();
   else if (a === "version") saveVersionDialog();
   else if (a === "history") historyDialog();
+  else if (a === "compare") compareDialog();
   else if (a === "templates") templatesDialog();
   else if (a === "fit") fitDialog();
   else if (a === "family") familyDialog();
@@ -3441,6 +3460,64 @@ function startMeasure() {
   $("#measure").classList.add("on");
   renderBanner();
 }
+// ---------- comparar dos versiones ----------
+
+/** Elegir qué dos versiones comparar (la de antes y la de después) */
+function compareDialog() {
+  const list = storage.versions(docId);
+  if (!list.length) return toast("Aún no hay versiones guardadas de esta pieza. Usa Archivo → Guardar versión.");
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const opts = (def: string) => [
+    h("option", { value: "now", ...(def === "now" ? { selected: "" } : {}) }, "Ahora (la que estás editando)"),
+    ...list.map((v) => h("option", { value: String(v.t), ...(def === String(v.t) ? { selected: "" } : {}) },
+      `${v.name} · ${new Date(v.t).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" })}`)),
+  ];
+  const cur = JSON.stringify(doc);
+  const before = list.find((v) => v.doc !== cur) ?? list[0];
+  const selA = h("select", {}, ...opts(String(before.t))) as HTMLSelectElement;
+  const selB = h("select", {}, ...opts("now")) as HTMLSelectElement;
+  dlg.append(h("h2", {}, "Comparar versiones"),
+    h("p", { class: "empty" }, "Se ven las dos a la vez: en verde lo que ha crecido, en rojo lo que ha desaparecido y en gris transparente lo que sigue igual."),
+    h("div", { class: "field" }, h("label", {}, "Antes"), selA),
+    h("div", { class: "field" }, h("label", {}, "Después"), selB),
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar"), " ",
+      h("button", { class: "btn primary", onclick: () => { if (selA.value === selB.value) return toast("Elige dos versiones distintas"); dlg.close(); startCompare(selA.value, selB.value); } }, "Comparar")));
+  dlg.showModal();
+}
+
+function startCompare(aKey: string, bKey: string) {
+  if (!engineReady) return toast("El motor aún está cargando");
+  const pick = (k: string): { d: Doc; name: string } | null => {
+    if (k === "now") return { d: doc, name: "ahora" };
+    const v = storage.versions(docId).find((x) => String(x.t) === k);
+    if (!v) return null;
+    try { return { d: JSON.parse(v.doc) as Doc, name: v.name }; } catch { return null; }
+  };
+  const A = pick(aKey), B = pick(bKey);
+  if (!A || !B) return toast("No encuentro esa versión");
+  if (measuring) stopMeasure();
+  closeMenu();
+  if (active) setActive(null);
+  selBody = null; renderSelPanel();
+  toast("Comparando…");
+  const s = ++compareSeq;
+  compareWaiters.set(s, (m) => {
+    rebuild(); // el motor vuelve a la pieza de ahora
+    if (!m.parts) return toast("No se pudo comparar: " + (m.error ?? ""));
+    comparing = { a: A.name, b: B.name, added: m.parts.added.volume, removed: m.parts.removed.volume };
+    viewport.setCompare(m.parts);
+    renderBanner();
+  });
+  worker.postMessage({ kind: "compare", seq: s, a: resolveDoc(A.d).features, b: resolveDoc(B.d).features });
+}
+
+function stopCompare() {
+  comparing = null;
+  viewport.setCompare(null);
+  renderBanner();
+}
+
 function stopMeasure() {
   measuring = false;
   viewport.clearMeasure();
