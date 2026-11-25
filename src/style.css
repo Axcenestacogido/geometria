@@ -308,3 +308,4 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin:
   .tree .act { opacity: 1; padding: 0 6px; }
   .field input, .field select { padding: 8px; font-size: 16px; }
 }
+.sk-amount { width: 64px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); text-align: center; }

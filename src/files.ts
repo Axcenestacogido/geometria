@@ -2,7 +2,7 @@
 // documento (localStorage tiene poco sitio) sino en IndexedDB, por id.
 // Al descargar el proyecto (.json) se meten dentro en base64 para poder llevarlo a otro equipo.
 
-export interface StoredFile { name: string; format: "step" | "stl"; data: ArrayBuffer }
+export interface StoredFile { name: string; format: "step" | "stl" | "image"; data: ArrayBuffer }
 
 const DB = "geometria-archivos";
 const STORE = "archivos";

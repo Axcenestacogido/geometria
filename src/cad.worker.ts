@@ -807,6 +807,40 @@ function runFeatures(features: RF[], upTo?: string) {
         case "layflat":
           layFlat(bodies, f.face as Vec3 | null);
           break;
+        case "transform": {
+          const idx = f.body ? bodies.findIndex((b) => b.id === f.body) : bodies.length - 1;
+          if (idx < 0) throw new Error(bodies.length ? "ese cuerpo ya no existe" : "todavía no hay ningún cuerpo que mover");
+          const b = bodies[idx];
+          if (!(f.scale > 0)) throw new Error("la escala tiene que ser mayor que 0 (1 = igual)");
+          let sh = b.shape.clone() as Shape;
+          // gira y escala alrededor del centro del cuerpo, que es lo natural
+          const c = sh.boundingBox.center as Vec3;
+          if (Math.abs(f.scale - 1) > 1e-9) sh = sh.scale(f.scale, c) as Shape;
+          if (f.rx) sh = sh.rotate(f.rx, c, [1, 0, 0]) as Shape;
+          if (f.ry) sh = sh.rotate(f.ry, c, [0, 1, 0]) as Shape;
+          if (f.rz) sh = sh.rotate(f.rz, c, [0, 0, 1]) as Shape;
+          if (f.dx || f.dy || f.dz) sh = sh.translate([f.dx, f.dy, f.dz]) as Shape;
+          if (f.copy) bodies.push({ id: f.id, name: `${b.name} (copia)`, shape: sh, coarse: b.coarse });
+          else bodies[idx] = { ...b, shape: sh };
+          break;
+        }
+        case "combine": {
+          const ti = bodies.findIndex((b) => b.id === f.target);
+          if (ti < 0) throw new Error("elige el cuerpo que se queda con el resultado");
+          const tools = f.tools.filter((id) => id !== f.target);
+          if (!tools.length) throw new Error("elige al menos otro cuerpo para combinar");
+          let sh = bodies[ti].shape;
+          let coarse = bodies[ti].coarse;
+          for (const id of tools) {
+            const t = bodies.find((b) => b.id === id);
+            if (!t) throw new Error("uno de los cuerpos elegidos ya no existe");
+            sh = (f.op === "add" ? sh.fuse(t.shape) : f.op === "cut" ? sh.cut(t.shape) : sh.intersect(t.shape)) as Shape;
+            coarse ||= t.coarse;
+          }
+          bodies[ti] = { ...bodies[ti], shape: sh, coarse };
+          if (!f.keep) for (const id of tools) { const k = bodies.findIndex((b) => b.id === id); if (k >= 0) bodies.splice(k, 1); }
+          break;
+        }
         case "component": {
           shape = componentShape(f.resolved as RF[], f.source.name);
           if (f.rz) shape = shape.rotate(f.rz, [0, 0, 0], [0, 0, 1]) as Shape;

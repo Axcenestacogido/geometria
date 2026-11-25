@@ -53,6 +53,8 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   cylinder: "Cilindro",
   sphere: "Esfera",
   gear: "Engranaje",
+  transform: "Mover / girar",
+  combine: "Combinar",
   spring: "Muelle",
   fillet: "Redondeo",
   chamfer: "Chaflán",
@@ -69,7 +71,7 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
-  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", spring: "〰", fillet: "◜", chamfer: "◸",
+  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
   shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", layflat: "⤓", component: "❖",
 };
 
@@ -102,6 +104,10 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, x: "0", y: "0", z: "0", w: "20", d: "20", h: "20", op };
     case "cylinder":
       return { id, name, type, x: "0", y: "0", z: "0", r: "10", h: "20", op };
+    case "transform":
+      return { id, name, type, body: "", dx: "0", dy: "0", dz: "0", rx: "0", ry: "0", rz: "0", scale: "1", copy: false };
+    case "combine":
+      return { id, name, type, op: "add", target: "", tools: [], keep: false };
     case "gear":
       return { id, name, type, x: "0", y: "0", z: "0", module: "2", teeth: "20", thickness: "8", bore: "5", fit: "0.2", angle: "0", op };
     case "spring":
@@ -152,6 +158,8 @@ const NUM_FIELDS: Record<string, string[]> = {
   box: ["x", "y", "z", "w", "d", "h"],
   cylinder: ["x", "y", "z", "r", "h"],
   sphere: ["x", "y", "z", "r"],
+  transform: ["dx", "dy", "dz", "rx", "ry", "rz", "scale"],
+  combine: [],
   gear: ["x", "y", "z", "module", "teeth", "thickness", "bore", "fit", "angle"],
   spring: ["x", "y", "z", "diameter", "wire", "pitch", "turns"],
   fillet: ["size"],
