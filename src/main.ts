@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -145,6 +145,7 @@ $("#app").innerHTML = `
 <input type="file" id="file3d" accept=".step,.stp,.stl" hidden />
 <input type="file" id="filesvg" accept=".svg,image/svg+xml" hidden />
 <input type="file" id="fileimg" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+<input type="file" id="filerelief" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
 <div id="printarea"></div>
 `;
 
@@ -227,8 +228,35 @@ const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text"
 
 /** Archivos importados que el motor ya tiene */
 const sentFiles = new Set<string>();
+/** Pasa una imagen a grises (sobre fondo blanco), como mucho 800 px de lado */
+async function grayImage(data: ArrayBuffer): Promise<{ w: number; h: number; data: Uint8Array }> {
+  const bmp = await createImageBitmap(new Blob([data]));
+  const k = Math.min(1, 800 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(2, Math.round(bmp.width * k)), hh = Math.max(2, Math.round(bmp.height * k));
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = hh;
+  const cx = cv.getContext("2d", { willReadFrequently: true })!;
+  cx.fillStyle = "#fff";
+  cx.fillRect(0, 0, w, hh);
+  cx.drawImage(bmp, 0, 0, w, hh);
+  bmp.close();
+  const px = cx.getImageData(0, 0, w, hh).data;
+  const out = new Uint8Array(w * hh);
+  for (let i = 0; i < out.length; i++) out[i] = Math.round(0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]);
+  return { w, h: hh, data: out };
+}
 async function sendFiles() {
   for (const f of doc.features) {
+    if (f.type === "relief" && f.file && !sentFiles.has(f.file)) {
+      sentFiles.add(f.file);
+      const st = await files.get(f.file);
+      if (!st) { sentFiles.delete(f.file); continue; }
+      try {
+        const g = await grayImage(st.data);
+        worker.postMessage({ kind: "gray", id: f.file, ...g }, [g.data.buffer]);
+      } catch { toast("No se pudo leer la imagen del relieve"); }
+      continue;
+    }
     if (f.type !== "import" || !f.file || sentFiles.has(f.file)) continue;
     sentFiles.add(f.file);
     const st = await files.get(f.file);
@@ -339,17 +367,18 @@ const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
   { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" }, { type: "catalog" }, { type: "split" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
-  { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
+  { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "relief" }, { type: "import" },
   { type: "component" }, { type: "layflat" },
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir",
+  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
   loft: "Transición suave entre dos o más bocetos (de cuadrado a círculo…)",
   text: "Letras en relieve o grabadas",
+  relief: "Desde una imagen: un logo en relieve (o grabado) o una litofanía con las alturas de una foto",
   import: "Traer una pieza STEP o STL de otro programa",
   component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
@@ -374,7 +403,7 @@ function renderTools() {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
       title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : ADD_TITLE[t.type] ?? "",
-      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "component" ? componentDialog() : addFeature(t.type)),
+      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "relief" ? (replacingRelief = null, $("#filerelief").click()) : t.type === "component" ? componentDialog() : addFeature(t.type)),
     }, h("b", {}, FEATURE_ICON[t.type]), ADD_LABEL[t.type] ?? FEATURE_LABEL[t.type]));
   }
 }
@@ -1219,6 +1248,7 @@ function renderProps() {
     case "sweep": renderSweepProps(sec, f); break;
     case "loft": renderLoftProps(sec, f); break;
     case "import": renderImportProps(sec, f); break;
+    case "relief": renderReliefProps(sec, f); break;
     case "layflat": renderLayFlatProps(sec, f); break;
     case "component": renderComponentProps(sec, f); break;
   }
@@ -1230,7 +1260,7 @@ function renderProps() {
 function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
   const k = (field: string) => `${f.id}:${field}`;
   const idx = doc.features.indexOf(f);
-  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "pattern", "text", "sweep", "loft", "import"].includes(x.type));
+  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "pattern", "text", "sweep", "loft", "import", "relief"].includes(x.type));
   sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["path", "A lo largo de un camino"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
   sec.append(selectField("Repetir", f.source, [["", "El cuerpo entero"], ...sources.map((s) => [s.id, s.name] as [string, string])], (v) => (f.source = v)));
   const axes: [string, string][] = [["x", "X (rojo)"], ["y", "Y (verde)"], ["z", "Z (azul)"]];
@@ -1339,6 +1369,10 @@ function renderTextProps(sec: HTMLElement, f: TextFeature) {
         h("button", { class: "btn small", title: "Quitar", onclick: () => { f.points = []; changed(true, true); } }, "✕"),
       )));
   }
+  if (p) {
+    sec.append(checkField("Seguir la curva (cara cilíndrica)", !!f.wrap, (v) => { if (v) f.wrap = true; else delete f.wrap; }));
+    if (f.wrap) sec.append(h("div", { class: "empty" }, "Cada letra se coloca tangente al cilindro y da la vuelta con él (el giro no se usa). Vale por fuera y por dentro de un vaso."));
+  }
   sec.append(h("div", { class: "empty mt" }, "Para imprimir bien: letras de 5 mm o más y grabado de 0,4–1 mm. Otro clic en una cara mueve el texto."));
 }
 
@@ -1379,6 +1413,74 @@ function renderImportProps(sec: HTMLElement, f: ImportFeature) {
     ? "Un STL es una malla de triángulos: se puede sumar y restar, pero cada cara es un triángulo y no se pueden redondear sus aristas. Si puedes, usa STEP."
     : "El STEP conserva las caras reales: puedes redondear, vaciar y hacer agujeros sobre él."));
 }
+
+function renderReliefProps(sec: HTMLElement, f: ReliefFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  const rf = resolved.features.find((x) => x.id === f.id) as Resolved<ReliefFeature> | undefined;
+  const pic = h("img", { class: "relief-pic", alt: "" }) as HTMLImageElement;
+  if (f.file) void imageUrl(f.file).then((u) => { if (u) pic.src = u; });
+  sec.append(h("div", { class: "relief-file" }, pic, h("div", {},
+    h("div", {}, f.fileName || "Sin imagen"),
+    h("button", { class: "btn small", onclick: () => { replacingRelief = f.id; $("#filerelief").click(); } }, "Cambiar imagen…"))));
+  const logo = f.mode === "logo";
+  sec.append(selectField("Qué hacer", f.mode, [["logo", "Logo (lo oscuro sale)"], ["relief", "Relieve o litofanía"]], (v) => {
+    f.mode = v as ReliefFeature["mode"];
+    // cada modo con un detalle razonable
+    if (f.mode === "relief" && Number(f.detail) > 160) f.detail = "100";
+    if (f.mode === "logo" && f.detail === "100") f.detail = "200";
+    if (f.mode === "relief" && f.height === "1" && f.op !== "cut") f.height = "2.4";
+  }));
+  sec.append(exprField("Ancho", () => f.width, (v) => (f.width = v), k("width"), { hint: rf ? `alto de la imagen: ${fmtEs(rf.width * f.aspect, 1)} mm` : undefined }));
+  if (logo) {
+    sec.append(exprField(f.op === "cut" ? "Profundidad" : "Alto", () => f.height, (v) => (f.height = v), k("height")));
+    sec.append(exprField("Umbral", () => f.threshold, (v) => (f.threshold = v), k("threshold"), { unit: " %", hint: "a partir de qué gris cuenta como logo; súbelo si sale demasiado" }));
+  } else {
+    sec.append(exprField(f.op === "cut" ? "Profundidad" : "Relieve", () => f.height, (v) => (f.height = v), k("height"), { hint: "de lo más claro a lo más oscuro" }));
+    if (f.op !== "cut") sec.append(exprField("Base", () => f.base, (v) => (f.base = v), k("base"), { hint: "placa por debajo; en una litofanía, lo más fino (0,6–0,8 mm)" }));
+  }
+  sec.append(exprField("Detalle", () => f.detail, (v) => (f.detail = v), k("detail"), { unit: " puntos", hint: logo ? "en el lado largo; de 10 a 400" : "en el lado largo; de 10 a 160 (más = más lento)" }));
+  sec.append(checkField(logo ? "Invertir (lo claro es el logo)" : "Invertir (lo claro, más alto)", f.invert, (v) => (f.invert = v)));
+  sec.append(h("h3", { class: "mt" }, "Dónde"));
+  sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x"), { hint: "centro de la imagen" }));
+  sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+  sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z"), { hint: f.op === "cut" ? "la cara donde se graba (se hunde hacia abajo)" : "dónde se apoya" }));
+  sec.append(...opFields(f));
+  sec.append(h("div", { class: "empty mt" }, logo
+    ? "Va mejor con logos de dos colores y buen contraste. Si tienes el logo en SVG, mejor impórtalo en un boceto: sale más limpio."
+    : "Para una litofanía: imprímela de pie (gírala 90° con Mover), al 100 % de relleno y en blanco; a contraluz se ve la foto."));
+}
+
+let replacingRelief: string | null = null;
+$("#filerelief").addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) return toast("La imagen pasa de 20 MB");
+  try {
+    const data = await file.arrayBuffer();
+    const bmp = await createImageBitmap(new Blob([data]));
+    const aspect = bmp.height / bmp.width;
+    bmp.close();
+    const id = await fileId(data);
+    await files.put(id, { name: file.name, format: "image", data });
+    const old = replacingRelief ? doc.features.find((x) => x.id === replacingRelief) : undefined;
+    replacingRelief = null;
+    if (old?.type === "relief") {
+      Object.assign(old, { file: id, fileName: file.name, aspect });
+      changed(true, true);
+      return;
+    }
+    const f = newFeature(doc, "relief") as ReliefFeature;
+    Object.assign(f, { file: id, fileName: file.name, aspect });
+    doc.features.push(f);
+    setActive(f.id);
+    changed(true, true);
+    toast("Imagen puesta. Ajusta el ancho en mm.");
+  } catch {
+    toast("No se pudo leer esa imagen");
+  }
+});
 
 // SVG → perfiles del boceto activo
 $("#filesvg").addEventListener("change", async (e) => {
@@ -1604,6 +1706,7 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
   const isOpen = p.kind === "poly" && !!p.open;
   if (!isOpen) ps.append(checkField("Es un agujero", p.hole, (v) => (p.hole = v)));
   if (p.kind === "poly") ps.append(checkField("Línea abierta (camino para un barrido)", isOpen, (v) => { if (v) p.open = true; else delete p.open; }));
+  if (p.kind === "poly") ps.append(checkField("Curva suave (pasa por todos los puntos)", !!p.smooth, (v) => { if (v) p.smooth = true; else delete p.smooth; }));
   const k = (fl: string) => `${f.id}:${p.id}:${fl}`;
   const E = (label: string, key: string, unit?: string) =>
     exprField(label, () => (p as never)[key], (v) => ((p as unknown as Record<string, unknown>)[key] = v), k(key), unit ? { unit } : {});
@@ -2358,7 +2461,7 @@ function historyDialog() {
 async function saveProjectFile() {
   const out: Doc = JSON.parse(JSON.stringify(doc));
   for (const f of doc.features) {
-    const fid = f.type === "import" ? f.file : f.type === "sketch" ? f.image?.file : undefined;
+    const fid = f.type === "import" || f.type === "relief" ? f.file : f.type === "sketch" ? f.image?.file : undefined;
     if (!fid || out.files?.[fid]) continue;
     const st = await files.get(fid);
     if (st) (out.files ??= {})[fid] = { name: st.name, format: st.format, data: toBase64(st.data) };

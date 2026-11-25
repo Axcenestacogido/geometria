@@ -5,11 +5,12 @@
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
 import * as R from "replicad";
-import { planeBasis, scale as vscale, type Basis } from "./geom";
+import { planeBasis, scale as vscale, smoothSegs, type Basis } from "./geom";
 import { buildModel3mf } from "./threemf";
 import { SCREWS } from "./screws";
 import { gearOutline } from "./gear";
 import { catalogPart, hexagon, type CatalogPart } from "./catalog";
+import { logoParts, heightGrid, type Gray, type P2 } from "./relief";
 /** pasos cuyo sólido conviene dibujar con menos detalle */
 const coarseIds = new Set<string>();
 import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash } from "./types";
@@ -39,6 +40,7 @@ opencascade({ locateFile: () => wasmUrl })
 self.onmessage = (ev: MessageEvent<WorkerIn>) => {
   const m = ev.data;
   if (m.kind === "file") { loadFile(m); return; }
+  if (m.kind === "gray") { grays.set(m.id, { w: m.w, h: m.h, data: m.data }); rerunLast(); return; }
   if (m.kind === "build") {
     // solo importa la última petición de reconstrucción
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === "build") queue.splice(i, 1);
@@ -92,6 +94,67 @@ function fontReady(font: TextFont): boolean {
       .finally(rerunLast);
   }
   return false;
+}
+
+/** Imágenes en grises para los relieves, por id de archivo */
+const grays = new Map<string, Gray>();
+
+/** Lo más fino que dejamos pedir: más puntos tardan demasiado */
+const MAX_LOGO = 400, MAX_RELIEF = 160;
+
+function reliefShape(f: Extract<RF, { type: "relief" }>): Shape {
+  if (!f.file) throw new Error("elige una imagen");
+  const img = grays.get(f.file);
+  if (!img) throw new Error("leyendo la imagen…");
+  if (!(f.width > 0)) throw new Error("el ancho tiene que ser mayor que 0");
+  if (!(f.height > 0)) throw new Error(f.mode === "logo" ? "el alto tiene que ser mayor que 0" : "el relieve tiene que ser mayor que 0");
+  const max = f.mode === "logo" ? MAX_LOGO : MAX_RELIEF;
+  if (!(f.detail >= 10) || f.detail > max) throw new Error(`el detalle tiene que ir de 10 a ${max}`);
+  const W = f.width, H = W * (img.h / img.w);
+  // al grabar, el logo se hunde desde Z hacia abajo
+  const engrave = f.op === "cut";
+  if (f.mode === "logo") {
+    if (f.threshold <= 0 || f.threshold >= 100) throw new Error("el umbral va de 1 a 99 %");
+    const parts = logoParts(img, { detail: f.detail, threshold: f.threshold, invert: f.invert, widthMm: W });
+    if (!parts.length) throw new Error("no sale ningún contorno: prueba a mover el umbral o «Invertir»");
+    const wire = (pts: P2[]) => R.makePolygon(pts.map(([x, y]) => [x, y, 0] as Vec3)).outerWire();
+    const solids: Shape[] = [];
+    for (const p of parts) {
+      try {
+        const face = R.makeFace(wire(p.outer), p.holes.map(wire));
+        solids.push(R.basicFaceExtrusion(face, new R.Vector([0, 0, f.height])) as unknown as Shape);
+      } catch { /* un contorno raro (se cruza consigo mismo): fuera */ }
+    }
+    if (!solids.length) throw new Error("no se pudo hacer ningún contorno");
+    const all = solids.length === 1 ? solids[0] : (R.makeCompound(solids) as unknown as Shape);
+    return all.translate(f.x, f.y, f.z - (engrave ? f.height : 0)) as Shape;
+  }
+  // relieve: superficie suave que pasa por las alturas, cortada en una placa
+  if (f.base < 0) throw new Error("la base no puede ser negativa");
+  if (!engrave && f.base < 0.2) throw new Error("pon al menos 0,2 mm de base para que sea una sola pieza");
+  // al grabar, lo oscuro va más hondo
+  const g = heightGrid(img, { detail: f.detail, invert: engrave ? !f.invert : f.invert, base: engrave ? 0 : f.base, depth: f.height });
+  const oc = R.getOC() as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const dx = W / (g.w - 1), dy = H / (g.h - 1);
+  const arr = new oc.NCollection_Array2_double(1, g.w + 2, 1, g.h + 2);
+  // un borde extra a cada lado (valor repetido) para que el recorte no caiga justo en el borde de la superficie
+  // la fila 0 de la imagen es la de arriba: Y más grande
+  for (let i = 0; i < g.w + 2; i++) for (let j = 0; j < g.h + 2; j++) {
+    const ii = Math.min(g.w - 1, Math.max(0, i - 1)), jj = Math.min(g.h - 1, Math.max(0, j - 1));
+    arr.SetValue(i + 1, j + 1, g.z[(g.h - 1 - jj) * g.w + ii]);
+  }
+  const b = new oc.GeomAPI_PointsToBSplineSurface();
+  b.Init(arr, -dx, dx, -dy, dy, 3, 3, oc.GeomAbs_Shape.GeomAbs_C2, 0.1);
+  if (!b.IsDone()) throw new Error("no se pudo hacer la superficie (prueba con menos detalle)");
+  const face = new oc.BRepBuilderAPI_MakeFace(b.Surface(), 1e-6).Face();
+  const top = (engrave ? 0 : f.base) + f.height;
+  const prism = new oc.BRepPrimAPI_MakePrism(face, new oc.gp_Vec(0, 0, -(top + 5)), false, true).Shape();
+  let sh = (R.cast(prism) as Shape).intersect(R.makeBox([0, 0, 0], [W, H, top + 1]) as Shape) as Shape;
+  // grabado: lo que queda por encima de la superficie es lo que se quita
+  if (engrave) sh = (R.makeBox([0, 0, 0], [W, H, f.height]) as Shape).cut(sh) as Shape;
+  sh = sh.translate(f.x - W / 2, f.y - H / 2, f.z - (engrave ? f.height : 0)) as Shape;
+  for (const o of [b, arr]) o.delete(); // la superficie la guarda la cara; el prisma lo guarda replicad
+  return sh;
 }
 
 /** Piezas importadas, ya convertidas a sólido, por id de archivo */
@@ -188,6 +251,7 @@ function profileDrawing(p: RSketch["profiles"][number]): R.Drawing {
       const pts = p.pts;
       if (p.open) throw new Error("una línea abierta no encierra nada: úsala como camino de un barrido");
       if (pts.length < 3) throw new Error("un perfil cerrado necesita 3 puntos o más");
+      if (p.smooth) return smoothPen(pts, true).close();
       let pen = R.draw([pts[0].x, pts[0].y]);
       for (let i = 0; i < pts.length; i++) {
         const a = pts[i];
@@ -203,12 +267,21 @@ function profileDrawing(p: RSketch["profiles"][number]): R.Drawing {
   }
 }
 
+/** Curva suave por todos los puntos (tramos de Bézier cúbica) */
+function smoothPen(pts: { x: number; y: number }[], closed: boolean) {
+  const segs = smoothSegs(pts.map((q) => [q.x, q.y] as [number, number]), closed);
+  let pen = R.draw(segs[0][0]);
+  for (const [, c1, c2, b] of segs) pen = pen.cubicBezierCurveTo(b, c1, c2);
+  return pen;
+}
+
 /** El camino de un barrido: la primera línea abierta del boceto, o si no hay, su primer contorno */
 function pathDrawing(s: RSketch): R.Drawing {
   const p = s.profiles.find((x) => x.kind === "poly" && x.open) ?? s.profiles[0];
   if (!p) throw new Error("el boceto del camino está vacío");
   if (p.kind !== "poly" || !p.open) return profileDrawing(p);
   if (p.pts.length < 2) throw new Error("el camino necesita 2 puntos o más");
+  if (p.smooth) return smoothPen(p.pts, false).done();
   let pen = R.draw([p.pts[0].x, p.pts[0].y]);
   for (let i = 0; i < p.pts.length - 1; i++) {
     const a = p.pts[i], b = p.pts[i + 1];
@@ -516,6 +589,71 @@ function textSolid(f: Extract<RF, { type: "text" }>): Shape {
   return (sk as R.Sketch).extrude(len) as Shape;
 }
 
+/** Cilindro de la cara que hay en p (eje y radio), o null si esa cara no es cilíndrica */
+function cylinderAt(shape: Shape, p: Vec3): { o: Vec3; a: Vec3; r: number } | null {
+  const near = nearestFace(shape, p);
+  if (!near || near.d > 0.5) return null;
+  const oc = R.getOC() as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const ad = new oc.BRepAdaptor_Surface(near.face.wrapped, true);
+  try {
+    if (ad.GetType() !== oc.GeomAbs_SurfaceType.GeomAbs_Cylinder) return null;
+    const c = ad.Cylinder(), ax = c.Axis(), l = ax.Location(), d = ax.Direction();
+    return { o: [l.X(), l.Y(), l.Z()], a: [d.X(), d.Y(), d.Z()], r: c.Radius() };
+  } finally { ad.delete(); }
+}
+
+/** Texto que da la vuelta a un cilindro: cada letra plana, tangente a la cara y girada según su sitio */
+function wrapTextSolid(f: Extract<RF, { type: "text" }>, body: Shape): Shape {
+  const p = f.points[f.points.length - 1];
+  const P: Vec3 = [p.x, p.y, p.z];
+  const cy = cylinderAt(body, P);
+  if (!cy) throw new Error("esa cara no es cilíndrica: haz clic en una cara redonda o quita «Seguir la curva»");
+  const { o, a, r } = cy;
+  const sub = (u: Vec3, v: Vec3): Vec3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const dot = (u: Vec3, v: Vec3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const cross = (u: Vec3, v: Vec3): Vec3 => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const add = (...vs: Vec3[]): Vec3 => vs.reduce((s, v) => [s[0] + v[0], s[1] + v[1], s[2] + v[2]], [0, 0, 0] as Vec3);
+  const rel = sub(P, o);
+  const h0 = dot(rel, a);
+  const radial = sub(rel, vscale(a, h0));
+  const rl = Math.hypot(...radial);
+  if (rl < 1e-6) throw new Error("el punto está en el eje del cilindro");
+  const u0 = vscale(radial, 1 / rl);
+  // cara de fuera (se lee desde fuera) o de dentro (el interior de un vaso)
+  const s = dot(p.n as Vec3, u0) >= 0 ? 1 : -1;
+  const font = R.getFont(f.font);
+  const adv = (t: string) => font.getAdvanceWidth(t, f.size);
+  const total = adv(f.text);
+  // alto: centrado como en el texto plano
+  const [[, y0], [, y1]] = R.drawText(f.text, { fontSize: f.size, fontFamily: f.font }).boundingBox.bounds;
+  const yMid = (y0 + y1) / 2;
+  if (total / r > 2 * Math.PI * 0.95) throw new Error("el texto es más largo que la vuelta entera: hazlo más pequeño");
+  const solids: Shape[] = [];
+  const chars = [...f.text];
+  let x = 0;
+  for (const ch of chars) {
+    const w = adv(ch);
+    const mid = x + w / 2 - total / 2;
+    x += w;
+    if (!ch.trim()) continue;
+    let d: R.Drawing;
+    try { d = R.drawText(ch, { fontSize: f.size, fontFamily: f.font }); } catch { continue; }
+    d = d.translate(-w / 2, -yMid);
+    const phi = (s * mid) / r;
+    const ui = add(vscale(u0, Math.cos(phi)), vscale(cross(a, u0), Math.sin(phi)));
+    const N = vscale(ui, s);
+    const t = cross(a, N);
+    // una letra plana sobre una cara curva: se separa de la cara en los bordes (la flecha)
+    const sag = r - Math.sqrt(Math.max(0, r * r - (w / 2) * (w / 2)));
+    const start = f.op === "cut" ? -f.depth : f.op === "add" ? -0.2 - sag * 1.2 : 0;
+    const len = f.op === "cut" ? f.depth + 0.3 + sag * 1.2 : f.op === "add" ? f.depth + 0.2 + sag * 1.2 : f.depth;
+    const origin = add(o, vscale(a, h0), vscale(ui, r), vscale(N, start));
+    solids.push((d.sketchOnPlane(new R.Plane(origin, t, N) as never) as R.Sketch).extrude(len) as Shape);
+  }
+  if (!solids.length) throw new Error("escribe algún texto");
+  return solids.length === 1 ? solids[0] : (R.makeCompound(solids) as unknown as Shape);
+}
+
 function holeTool(f: Extract<RF, { type: "hole" }>, depth: number): Shape {
   const sc = SCREWS[f.size];
   if (!sc) throw new Error(`no conozco la medida ${f.size}`);
@@ -808,6 +946,10 @@ function runFeatures(features: RF[], upTo?: string) {
           shape = sh.translate(f.x, f.y, f.z) as Shape;
           break;
         }
+        case "relief":
+          shape = reliefShape(f);
+          if (f.mode === "relief") coarseIds.add(f.id);
+          break;
         case "layflat":
           layFlat(bodies, f.face as Vec3 | null);
           break;
@@ -893,7 +1035,7 @@ function runFeatures(features: RF[], upTo?: string) {
           if (!f.text.trim()) throw new Error("escribe algún texto");
           if (f.size <= 0 || f.depth <= 0) throw new Error("el alto y la profundidad deben ser mayores que 0");
           if (!fontReady(f.font)) throw new Error("cargando la tipografía…");
-          shape = textSolid(f);
+          shape = f.wrap && f.points.length ? wrapTextSolid(f, targetBody(bodies, (f as { target?: string }).target).shape) : textSolid(f);
           break;
         }
         case "box":

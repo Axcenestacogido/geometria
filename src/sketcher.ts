@@ -3,7 +3,7 @@
 
 import type { Profile, SegRef, SketchConstraint, SketchFeature } from "./types";
 import { CONSTRAINT_GLYPH, CONSTRAINT_NAME, segOf, solveSketch, cleanConstraints } from "./constraints";
-import { arcPoints, uid } from "./geom";
+import { arcPoints, bezierPoints, smoothSegs, uid } from "./geom";
 import { fmt } from "./expr";
 import { filletAll, filletCorner, offsetPoly, removeSegment, type NP } from "./sketchops";
 
@@ -217,6 +217,10 @@ export class SketchEditor {
         const loop: P2[] = [];
         const segs: P2[][] = [];
         const dims: Dim[] = [];
+        if (p.smooth && pts.length >= 2) {
+          smoothSegs(pts, !p.open).forEach((sg, i) => { const seg = bezierPoints(sg); segs.push(seg); loop.push(...(i === 0 ? seg : seg.slice(1))); });
+          return { loop, handles: pts.map((q, i) => ({ key: `p${i}`, p: q })), dims, segs };
+        }
         pts.forEach((a, i) => {
           if (p.open && i === pts.length - 1) return; // línea abierta: sin tramo de vuelta
           const b = pts[(i + 1) % pts.length];
