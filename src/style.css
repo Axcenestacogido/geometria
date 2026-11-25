@@ -17,6 +17,7 @@
   --sketch: #5a6b7d;
   --hover: #2f7de1;
   --paper: #fbfaf7;
+  --cap: #d2643a;
   --radius: 8px;
   color-scheme: light;
 }
@@ -38,13 +39,14 @@
     --sketch: #9fb0c2;
     --hover: #5aa0ff;
     --paper: #1d1e21;
+    --cap: #c86a42;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #17181a; --panel: #1f2023; --panel-2: #26272b; --line: #34363b; --text: #ecebe8; --muted: #9c9993;
   --accent: #f0864f; --accent-soft: #3a2a20; --view-bg: #1b1c1f; --grid: #2b2d31; --grid-main: #41444a;
-  --body: #7d93aa; --edge: #0e1013; --sketch: #9fb0c2; --hover: #5aa0ff; --paper: #1d1e21; color-scheme: dark;
+  --body: #7d93aa; --edge: #0e1013; --sketch: #9fb0c2; --hover: #5aa0ff; --paper: #1d1e21; --cap: #c86a42; color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -194,3 +196,56 @@ kbd { font: 11px ui-monospace, monospace; background: var(--panel-2); border: 1p
 .sketch-svg .cons:hover text { fill: #fff; }
 .list small.block { display: block; margin-top: 2px; }
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 6px 0; }
+
+/* fase 4: corte, colores, plano y móvil */
+.secpanel { position: absolute; left: 10px; bottom: 10px; z-index: 6; display: flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 5px 10px; box-shadow: 0 4px 14px #0002; }
+.secpanel[hidden] { display: none; }
+.secpanel input[type=range] { width: 160px; accent-color: var(--accent); }
+.color-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.color-row input[type=color] { width: 30px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 5px; background: none; cursor: pointer; }
+.sheet { background: #fff; border: 1px solid var(--line); border-radius: 6px; width: min(860px, 86vw); max-height: 64vh; overflow: auto; display: grid; place-items: center; min-height: 120px; }
+.sheet svg { width: 100%; height: auto; display: block; }
+.sheet .empty { padding: 30px; }
+#printarea { display: none; }
+.mobile-only { display: none; }
+.desk-only { display: contents; }
+
+@media print {
+  @page { size: A4 landscape; margin: 0; }
+  html, body { height: auto; background: #fff; }
+  body > :not(#app) { display: none !important; }
+  #app > :not(#printarea) { display: none !important; }
+  #app { display: block; height: auto; }
+  #printarea { display: block; }
+  #printarea svg { width: 297mm; height: 210mm; display: block; }
+}
+
+@media (max-width: 700px) {
+  .mobile-only { display: inline-block; }
+  .desk-only { display: none; }
+  #app { height: auto; min-height: 100%; }
+  /* la vista 3D se queda arriba fija y los paneles pasan por debajo */
+  .main { grid-template-rows: 48vh auto auto; }
+  .view { position: sticky; top: 0; z-index: 4; border-bottom: 1px solid var(--line); }
+  #props { scroll-margin-top: 49vh; }
+  .top { padding: 6px 8px; gap: 6px; }
+  .brand span { display: none; }
+  .docname { min-width: 0; order: 10; flex: 1 1 100%; max-width: none; }
+  .sketchhint { font-size: 11px; max-height: 3.2em; overflow: hidden; }
+  .viewbar { left: 6px; right: 6px; top: 6px; justify-content: flex-start; }
+  .viewbar .sep { display: none; }
+  .banner { top: auto; bottom: 10px; max-width: 94%; flex-wrap: wrap; font-size: 12px; }
+  .secpanel { left: 6px; right: 6px; bottom: 6px; border-radius: 12px; flex-wrap: wrap; }
+  .secpanel input[type=range] { flex: 1; min-width: 120px; }
+  .sketchbar { left: 6px; right: 6px; top: 6px; }
+  .tools { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .status { flex-wrap: wrap; gap: 6px 12px; }
+  .menu-list { right: auto; left: 0; }
+  #m-export .menu-list { right: 0; left: auto; }
+}
+@media (pointer: coarse) {
+  .btn.small { padding: 6px 10px; font-size: 13px; }
+  .tree li { padding: 9px 6px; }
+  .tree .act { opacity: 1; padding: 0 6px; }
+  .field input, .field select { padding: 8px; font-size: 16px; }
+}

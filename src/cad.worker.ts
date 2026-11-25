@@ -8,7 +8,7 @@ import * as R from "replicad";
 import { planeBasis, scale as vscale, type Basis } from "./geom";
 import { buildModel3mf } from "./threemf";
 import { SCREWS } from "./screws";
-import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont } from "./types";
+import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView } from "./types";
 import interRegular from "./fonts/Inter-Regular.otf?url";
 import interBold from "./fonts/Inter-Bold.otf?url";
 import monoBold from "./fonts/JetBrainsMono-Bold.ttf?url";
@@ -52,6 +52,7 @@ function pump() {
       const m = queue.shift()!;
       if (m.kind === "build") doBuild(m);
       else if (m.kind === "export") doExport(m);
+      else if (m.kind === "drawing") doDrawing(m);
     }
   } finally {
     busy = false;
@@ -570,8 +571,60 @@ type Tool = { shape: Shape; op: string; target?: string };
 
 const AXES: Record<string, Vec3> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
 
-function patternCopies(f: Extract<RF, { type: "pattern" }>, base: Shape): Shape[] {
+/** Puntos y direcciones repartidos a la misma distancia a lo largo de un camino */
+function pathStations(path: RSketch, n: number): { p: Vec3; t: Vec3 }[] {
+  const wire = (pathDrawing(path).sketchOnPlane(makePlane(sketchBasis(path))) as R.Sketch).wire;
+  // el parámetro de OpenCascade no avanza igual en rectas que en arcos: se mide con muestras
+  const N = 600;
+  const pts: Vec3[] = [], acc: number[] = [0];
+  for (let i = 0; i <= N; i++) {
+    const v = wire.pointAt(i / N);
+    pts.push([v.x, v.y, v.z]);
+    if (i) acc.push(acc[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1], pts[i][2] - pts[i - 1][2]));
+  }
+  const L = acc[N];
+  if (L < 1e-6) throw new Error("el camino no tiene largo");
+  const closed = Math.hypot(pts[0][0] - pts[N][0], pts[0][1] - pts[N][1], pts[0][2] - pts[N][2]) < 1e-4;
+  const step = closed ? L / n : L / Math.max(1, n - 1);
+  const out: { p: Vec3; t: Vec3 }[] = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const d = Math.min(L, k * step);
+    while (j < N - 1 && acc[j + 1] < d) j++;
+    const seg = acc[j + 1] - acc[j] || 1;
+    const u = (d - acc[j]) / seg;
+    const a = pts[j], b = pts[j + 1];
+    const t = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const tl = Math.hypot(t[0], t[1], t[2]) || 1;
+    out.push({ p: [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u], t: [t[0] / tl, t[1] / tl, t[2] / tl] });
+  }
+  return out;
+}
+
+function patternCopies(f: Extract<RF, { type: "pattern" }>, base: Shape, sketches?: Map<string, RSketch>): Shape[] {
   const out: Shape[] = [];
+  if (f.kind === "path") {
+    const path = f.path ? sketches?.get(f.path) : undefined;
+    if (!path) throw new Error("elige el boceto con el camino");
+    if (path.off) throw new Error("el boceto del camino está apagado");
+    const n = Math.round(f.count);
+    if (n < 2 || n > 200) throw new Error("el número de copias tiene que estar entre 2 y 200");
+    const st = pathStations(path, n);
+    const p0 = st[0].p, t0 = st[0].t;
+    for (let i = 1; i < n; i++) {
+      let c = base.clone() as Shape;
+      if (f.align) {
+        const t = st[i].t;
+        const ax: Vec3 = [t0[1] * t[2] - t0[2] * t[1], t0[2] * t[0] - t0[0] * t[2], t0[0] * t[1] - t0[1] * t[0]];
+        const sin = Math.hypot(...ax), cos = t0[0] * t[0] + t0[1] * t[1] + t0[2] * t[2];
+        const ang = (Math.atan2(sin, cos) * 180) / Math.PI;
+        if (sin > 1e-9) c = c.rotate(ang, p0, ax) as Shape;
+        else if (cos < 0) c = c.rotate(180, p0, sketchBasis(path).n) as Shape;
+      }
+      out.push(c.translate([st[i].p[0] - p0[0], st[i].p[1] - p0[1], st[i].p[2] - p0[2]]) as Shape);
+    }
+    return out;
+  }
   if (f.kind === "mirror") {
     out.push(base.clone().mirror(AXES[f.axis], vscale(AXES[f.axis], f.offset)) as Shape);
     return out;
@@ -814,7 +867,7 @@ function runFeatures(features: RF[], upTo?: string) {
         case "pattern": {
           if (!f.source) {
             const b = targetBody(bodies);
-            const copies = patternCopies(f, b.shape);
+            const copies = patternCopies(f, b.shape, sketches);
             const idx = bodies.indexOf(b);
             let sh = b.shape;
             for (const c of copies) sh = sh.fuse(c);
@@ -826,7 +879,7 @@ function runFeatures(features: RF[], upTo?: string) {
             const src = features.find((x) => x.id === f.source);
             throw new Error(src ? (src.off ? "el paso a repetir está apagado" : "el paso a repetir tiene que ir antes y crear o quitar volumen") : "elige qué repetir");
           }
-          const copies = patternCopies(f, t.shape);
+          const copies = patternCopies(f, t.shape, sketches);
           const all = copies.length === 1 ? copies[0] : (R.makeCompound(copies) as unknown as Shape);
           // si el original creó un cuerpo, las copias se suman a ese cuerpo
           combine(bodies, { id: f.id, op: t.op === "new" ? "add" : t.op, target: t.target } as never, all, "");
@@ -906,7 +959,7 @@ async function doExport(m: Extract<WorkerIn, { kind: "export" }>) {
       const objs = bodies.map((b) => {
         // con roscas, la malla fina sería enorme: basta con 0,02 mm
         const mm = b.shape.mesh(b.coarse ? { tolerance: 0.02, angularTolerance: 0.2 } : { tolerance: 0.01, angularTolerance: 0.1 });
-        return { name: b.name, vertices: mm.vertices, triangles: mm.triangles };
+        return { name: b.name, vertices: mm.vertices, triangles: mm.triangles, color: m.colors?.[b.id] };
       });
       data = buildModel3mf(objs);
     } else {
@@ -922,3 +975,33 @@ async function doExport(m: Extract<WorkerIn, { kind: "export" }>) {
   }
 }
 
+
+/** Plano 2D: vistas de frente, arriba, derecha y 3D, con las líneas ocultas aparte */
+function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
+  try {
+    const { bodies } = runFeatures(m.features);
+    if (!bodies.length) throw new Error("no hay ninguna pieza que dibujar");
+    const all = bodies.length === 1 ? bodies[0].shape : (R.makeCompound(bodies.map((b) => b.shape)) as unknown as Shape);
+    const cams: [DrawingView["name"], R.ProjectionPlane | R.ProjectionCamera][] = [
+      ["front", "front"], ["top", "top"], ["right", "right"],
+      ["iso", new R.ProjectionCamera([0, 0, 0], [1, -1, 1], [1, 1, 0])],
+    ];
+    const flat = (d: R.Drawing) => {
+      const p = d.toSVGPaths() as unknown as (string | string[])[];
+      return p.flat();
+    };
+    const views: DrawingView[] = [];
+    for (const [name, cam] of cams) {
+      const { visible, hidden } = R.drawProjection(all, cam);
+      const vis = flat(visible);
+      if (!vis.length) continue;
+      const bb = visible.boundingBox;
+      const [[x0, y0], [x1, y1]] = bb.bounds;
+      // el SVG tiene la Y hacia abajo: replicad ya la da la vuelta
+      views.push({ name, visible: vis, hidden: name === "iso" ? [] : flat(hidden), box: [x0, -y1, x1, -y0] });
+    }
+    post({ kind: "drawing", seq: m.seq, views });
+  } catch (e) {
+    post({ kind: "drawing", seq: m.seq, error: msg(e) });
+  }
+}

@@ -118,7 +118,7 @@ export interface ShellFeature extends FeatureBase {
   faces: Vec3[];
 }
 
-export type PatternKind = "linear" | "circular" | "mirror";
+export type PatternKind = "linear" | "circular" | "mirror" | "path";
 export type Axis = "x" | "y" | "z";
 
 /** Repetir o reflejar un paso (o el cuerpo entero) */
@@ -140,6 +140,9 @@ export interface PatternFeature extends FeatureBase {
   angle: Expr;
   // simetría: plano perpendicular a `axis` que pasa por `offset`
   offset: Expr;
+  // a lo largo de un camino: boceto con el camino y si las copias giran con él
+  path?: string;
+  align?: boolean;
 }
 
 /** Punto sobre una cara, con su normal hacia fuera */
@@ -266,6 +269,8 @@ export interface Doc {
   name: string;
   variables: Variable[];
   features: Feature[];
+  /** Color de cada cuerpo (id del cuerpo → "#rrggbb") */
+  colors?: Record<string, string>;
   /** Solo en el .json descargado: archivos importados (base64), para llevarlos a otro equipo */
   files?: Record<string, { name: string; format: "step" | "stl"; data: string }>;
 }
@@ -309,11 +314,22 @@ export interface BuildResult {
 export type WorkerIn =
   | { kind: "build"; seq: number; features: Resolved<Feature>[]; upTo?: string }
   | { kind: "file"; id: string; format: "step" | "stl"; data: ArrayBuffer }
-  | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf" };
+  | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf"; colors?: Record<string, string> }
+  | { kind: "drawing"; seq: number; features: Resolved<Feature>[] };
 
 export type WorkerOut =
   | { kind: "ready" }
   | { kind: "fatal"; message: string }
   | ({ kind: "built" } & BuildResult)
   | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string }
-  | { kind: "file"; id: string; error?: string; triangles?: number };
+  | { kind: "file"; id: string; error?: string; triangles?: number }
+  | { kind: "drawing"; seq: number; views?: DrawingView[]; error?: string };
+
+/** Una vista de un plano 2D: trazos visibles y ocultos (SVG, en mm, Y hacia abajo) */
+export interface DrawingView {
+  name: "front" | "top" | "right" | "iso";
+  visible: string[];
+  hidden: string[];
+  /** caja de la vista: [xmin, ymin, xmax, ymax] */
+  box: [number, number, number, number];
+}

@@ -50,6 +50,12 @@ export class SketchEditor {
   private refOut: number[] = [];
   private refPts: P2[] = [];
   private pendingFit = false;
+  /** pantalla táctil: puntos más grandes y más margen al tocar */
+  readonly coarse = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  /** dedos apoyados, para pellizcar (zoom) y mover con dos dedos */
+  private touches = new Map<number, P2>();
+  private pinch: { d0: number; z0: number; m0: P2; c0: P2 } | null = null;
+  private draftAtTouch = 0;
 
   /** Volver a encajar la vista cuando llegue la referencia (p. ej. tras cambiar de plano) */
   refitSoon() { this.pendingFit = true; }
@@ -78,6 +84,7 @@ export class SketchEditor {
     this.svg.addEventListener("pointerdown", (e) => this.down(e));
     this.svg.addEventListener("pointermove", (e) => this.move(e));
     this.svg.addEventListener("pointerup", (e) => this.up(e));
+    this.svg.addEventListener("pointercancel", (e) => { this.touches.delete(e.pointerId); if (!this.touches.size) this.pinch = null; this.drag = null; });
     this.svg.addEventListener("dblclick", (e) => this.dbl(e));
     this.svg.addEventListener("wheel", (e) => this.wheel(e), { passive: false });
     this.svg.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -127,7 +134,7 @@ export class SketchEditor {
 
   private snap(p: P2, e?: { shiftKey: boolean }): P2 {
     // 1) puntos existentes
-    const tol = 8 / this.zoom;
+    const tol = (this.coarse ? 14 : 8) / this.zoom;
     let best: P2 | null = null, bd = tol;
     for (const q of this.allPoints()) {
       const d = Math.hypot(q[0] - p[0], q[1] - p[1]);
@@ -271,7 +278,8 @@ export class SketchEditor {
       if (sel || (this.feature.profiles.length < 12 && g.dims.length <= 16)) for (const d of g.dims) out.push(this.dimSvg(d, p.id, sel));
       if (sel) for (const h of g.handles) {
         const [x, y] = this.toScreen(h.p);
-        out.push(`<rect x="${x - 5}" y="${y - 5}" width="10" height="10" class="handle" data-pid="${p.id}" data-h="${h.key}"/>`);
+        const hs = this.coarse ? 9 : 5;
+        out.push(`<rect x="${x - hs}" y="${y - hs}" width="${hs * 2}" height="${hs * 2}" class="handle" data-pid="${p.id}" data-h="${h.key}"/>`);
       }
     }
     // restricciones: un símbolo junto a cada tramo (clic para quitarla)
@@ -343,8 +351,51 @@ export class SketchEditor {
   }
 
   // ---------- ratón ----------
+  /** Dos dedos: pellizcar para el zoom y arrastrar para mover la vista */
+  private touchDown(e: PointerEvent): boolean {
+    if (e.pointerType !== "touch") return false;
+    this.touches.set(e.pointerId, [e.clientX, e.clientY]);
+    if (this.touches.size === 1) this.draftAtTouch = this.draft.length;
+    if (this.touches.size !== 2) return this.touches.size > 2;
+    // el segundo dedo cancela lo que hiciera el primero (también el punto que acababa de poner)
+    this.drag = null;
+    this.draft.length = Math.min(this.draft.length, this.draftAtTouch);
+    const [a, b] = [...this.touches.values()];
+    this.pinch = { d0: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, z0: this.zoom, m0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], c0: [...this.center] };
+    try { this.svg.setPointerCapture(e.pointerId); } catch { /* el dedo ya se levantó */ }
+    return true;
+  }
+
+  private touchMove(e: PointerEvent): boolean {
+    if (e.pointerType !== "touch" || !this.touches.has(e.pointerId)) return false;
+    this.touches.set(e.pointerId, [e.clientX, e.clientY]);
+    if (!this.pinch || this.touches.size < 2) return false;
+    const [a, b] = [...this.touches.values()];
+    const p = this.pinch;
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1;
+    const mid: P2 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const r = this.svg.getBoundingClientRect();
+    // el punto del dibujo que estaba bajo el centro de los dedos se queda bajo ellos
+    const under: P2 = [(p.m0[0] - r.left - this.W / 2) / p.z0 + p.c0[0], -(p.m0[1] - r.top - this.H / 2) / p.z0 + p.c0[1]];
+    this.zoom = Math.max(0.05, Math.min(400, p.z0 * (d / p.d0)));
+    this.center = [under[0] - (mid[0] - r.left - this.W / 2) / this.zoom, under[1] + (mid[1] - r.top - this.H / 2) / this.zoom];
+    this.render();
+    return true;
+  }
+
+  private touchUp(e: PointerEvent): boolean {
+    if (e.pointerType !== "touch") return false;
+    this.touches.delete(e.pointerId);
+    if (this.pinch) {
+      if (this.touches.size === 0) this.pinch = null;
+      return true;
+    }
+    return false;
+  }
+
   private down(e: PointerEvent) {
     if (!this.feature) return;
+    if (this.touchDown(e)) return;
     this.stopEditing();
     const t = e.target as Element;
     // capturar el puntero solo si vamos a arrastrar algo (para no estropear el doble clic)
@@ -379,7 +430,9 @@ export class SketchEditor {
         if (seg !== null) {
           const r = { p: pid, i: Number(seg) };
           const has = this.picks.findIndex((q) => q.p === r.p && q.i === r.i);
-          if (e.shiftKey) { if (has >= 0) this.picks.splice(has, 1); else this.picks = [...this.picks.slice(-1), r]; }
+          // con el dedo no hay Mayús: tocar otro tramo lo añade, y tocar el mismo lo quita
+          const touchAdd = e.pointerType === "touch" && this.picks.length > 0;
+          if (e.shiftKey || touchAdd) { if (has >= 0) this.picks.splice(has, 1); else this.picks = [...this.picks.slice(-1), r]; }
           else this.picks = [r];
         } else if (!e.shiftKey) this.picks = [];
         const prof = this.feature.profiles.find((p) => p.id === pid)!;
@@ -493,6 +546,7 @@ export class SketchEditor {
 
   private move(e: PointerEvent) {
     if (!this.feature) return;
+    if (this.touchMove(e) || this.pinch) return;
     if (this.drag?.kind === "pan") {
       this.center = [this.drag.c[0] - (e.clientX - this.drag.sx) / this.zoom, this.drag.c[1] + (e.clientY - this.drag.sy) / this.zoom];
       this.render();
@@ -523,7 +577,8 @@ export class SketchEditor {
     this.render();
   }
 
-  private up(_e: PointerEvent) {
+  private up(e: PointerEvent) {
+    if (this.touchUp(e)) return;
     const d = this.drag;
     this.drag = null;
     if (d && d.kind !== "pan" && d.moved) this.cb.onChange(true);

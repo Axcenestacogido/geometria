@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature,
+  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -88,20 +88,27 @@ $("#app").innerHTML = `
   <section class="view" id="view">
     <div class="viewbar">
       <button class="btn small" id="measure" title="Medir distancias entre dos puntos">📏 Medir</button>
+      <button class="btn small" id="section" title="Cortar la pieza con un plano para ver el interior">✂ Corte</button>
+      <button class="btn small" id="drawing" title="Plano 2D con medidas, para imprimir o guardar en PDF">📐 Plano</button>
       <span class="sep"></span>
       <button class="btn small" data-v="iso" title="Vista 3D">3D</button>
       <button class="btn small" id="persp" title="Cambia la vista 3D entre perspectiva e isométrica (paralela)">Perspectiva</button>
       <span class="sep"></span>
-      <button class="btn small" data-v="top">Arriba</button>
+      <select class="btn small mobile-only" id="viewsel" title="Vistas">
+        <option value="">Vista…</option><option value="top">Arriba</option><option value="bottom">Abajo</option><option value="front">Frente</option>
+        <option value="back">Detrás</option><option value="left">Izquierda</option><option value="right">Derecha</option>
+      </select>
+      <span class="desk-only views"><button class="btn small" data-v="top">Arriba</button>
       <button class="btn small" data-v="bottom">Abajo</button>
       <button class="btn small" data-v="front">Frente</button>
       <button class="btn small" data-v="back">Detrás</button>
       <button class="btn small" data-v="left">Izquierda</button>
-      <button class="btn small" data-v="right">Derecha</button>
+      <button class="btn small" data-v="right">Derecha</button></span>
       <span class="sep"></span>
       <button class="btn small" data-v="fit">Encajar</button>
     </div>
     <div class="banner" id="banner" hidden></div>
+    <div class="secpanel" id="secpanel" hidden></div>
     <div class="sketch" id="sketch">
       <div class="sketchbar" id="sketchbar"></div>
       <div class="sketchhint" id="sketchhint"></div>
@@ -115,6 +122,7 @@ $("#app").innerHTML = `
 <input type="file" id="file" accept=".json,application/json" hidden />
 <input type="file" id="file3d" accept=".step,.stp,.stl" hidden />
 <input type="file" id="filesvg" accept=".svg,image/svg+xml" hidden />
+<div id="printarea"></div>
 `;
 
 const viewport = new Viewport($("#view"));
@@ -130,6 +138,7 @@ const sketcher = new SketchEditor($("#sketch"), {
 
 const worker = new Worker(new URL("./cad.worker.ts", import.meta.url), { type: "module" });
 const exportWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "exported" }>) => void>();
+const drawingWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "drawing" }>) => void>();
 
 worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   const m = ev.data;
@@ -149,7 +158,8 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
       // la lista de cuerpos cambió: rehacer el panel si no estás escribiendo en él
       if (!$("#props").contains(document.activeElement)) renderProps();
     }
-    viewport.setBodies(m.bodies);
+    viewport.setBodies(m.bodies, doc.colors ?? {});
+    if (section) viewport.setSection(section);
     renderPieceInfo();
     $("#buildtime").textContent = `${m.ms} ms`;
     renderTree();
@@ -163,6 +173,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   } else if (m.kind === "file") {
     if (m.error) toast("No se pudo leer el archivo: " + m.error);
     else if (m.triangles) toast(`Archivo leído (${m.triangles} triángulos)`);
+  } else if (m.kind === "drawing") {
+    drawingWaiters.get(m.seq)?.(m);
+    drawingWaiters.delete(m.seq);
   } else if (m.kind === "exported") {
     exportWaiters.get(m.seq)?.(m);
     exportWaiters.delete(m.seq);
@@ -319,6 +332,11 @@ function setActive(id: string | null) {
   renderProps();
   renderBanner();
   rebuild();
+  // en el móvil, llevarte a lo que acabas de abrir
+  if (id && matchMedia("(max-width: 700px)").matches) {
+    if (f?.type === "sketch") window.scrollTo({ top: 0, behavior: "smooth" });
+    else $("#props").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 function renderTree() {
@@ -513,8 +531,53 @@ function renderPieceInfo() {
     h("div", { class: "empty" }, "Calculado como si se imprimiera maciza (100 % de relleno). Con el relleno normal de tu laminador gastará bastante menos."),
   );
   if (bodies.length > 1) box.append(h("div", { class: "empty" }, `Suma de ${bodies.length} cuerpos.`));
+  renderColors(box, bodies);
   renderPrintCheck(box);
 }
+
+// ---------- colores por cuerpo ----------
+const DEFAULT_COLOR = "#9aa7b8";
+const PALETTE = ["#e8743b", "#3b7dd8", "#4cae4c", "#d9b43b", "#8a4fd8", "#22201c", "#f4f2ee", "#c8402f"];
+function renderColors(box: HTMLElement, bodies: { id: string; name: string }[]) {
+  box.append(h("h3", { class: "mt" }, "Colores",
+    doc.colors && Object.keys(doc.colors).length ? h("button", { class: "btn small", onclick: () => { delete doc.colors; changed(true); renderPieceInfo(); } }, "Quitar") : null));
+  bodies.forEach((b, i) => {
+    const input = h("input", { type: "color", value: doc.colors?.[b.id] ?? DEFAULT_COLOR, title: "Color de este cuerpo" }) as HTMLInputElement;
+    input.addEventListener("input", () => {
+      (doc.colors ??= {})[b.id] = input.value;
+      viewport.setBodies(build?.bodies ?? [], doc.colors);
+      if (section) viewport.setSection(section);
+    });
+    input.addEventListener("change", () => changed(true));
+    const quick = h("button", { class: "btn small", title: "Poner un color distinto", onclick: () => {
+      (doc.colors ??= {})[b.id] = PALETTE[i % PALETTE.length];
+      changed(true); renderPieceInfo();
+    } }, "↻");
+    box.append(h("div", { class: "color-row" }, input, h("span", { class: "grow" }, b.name), quick));
+  });
+  box.append(h("div", { class: "empty" }, "Cada cuerpo sale como un objeto aparte en el 3MF, con su color. En Bambu Studio u Orca asígnale después el filamento del AMS a cada objeto (el color guardado sirve de guía; no todos los laminadores lo leen)."));
+}
+
+// ---------- vista de corte ----------
+let section: { axis: 0 | 1 | 2; at: number; flip: boolean } | null = null;
+function renderSection() {
+  const p = $("#secpanel");
+  $("#section").classList.toggle("on", !!section);
+  p.hidden = !section;
+  p.innerHTML = "";
+  if (!section) { viewport.setSection(null); return; }
+  const s = section;
+  const axBtn = (ax: 0 | 1 | 2, label: string) => h("button", { class: `btn small ${s.axis === ax ? "on" : ""}`, onclick: () => { s.axis = ax; renderSection(); } }, label);
+  const range = h("input", { type: "range", min: "0", max: "1000", value: String(Math.round(s.at * 1000)), title: "Dónde corta" }) as HTMLInputElement;
+  range.addEventListener("input", () => { s.at = Number(range.value) / 1000; viewport.setSection(s); });
+  p.append(
+    h("b", {}, "Corte"), axBtn(0, "X"), axBtn(1, "Y"), axBtn(2, "Z"), range,
+    h("button", { class: "btn small", title: "Ver el otro lado", onclick: () => { s.flip = !s.flip; renderSection(); } }, "⇄"),
+    h("button", { class: "btn small", title: "Quitar el corte", onclick: () => { section = null; renderSection(); } }, "✕"),
+  );
+  viewport.setSection(s);
+}
+$("#section").addEventListener("click", () => { section = section ? null : { axis: 1, at: 0.5, flip: true }; renderSection(); });
 
 // ---------- comprobación para imprimir ----------
 const PRINT_KEY = "geometria:impresion";
@@ -677,7 +740,7 @@ function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
   const k = (field: string) => `${f.id}:${field}`;
   const idx = doc.features.indexOf(f);
   const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "pattern", "text", "sweep", "loft", "import"].includes(x.type));
-  sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
+  sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["path", "A lo largo de un camino"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
   sec.append(selectField("Repetir", f.source, [["", "El cuerpo entero"], ...sources.map((s) => [s.id, s.name] as [string, string])], (v) => (f.source = v)));
   const axes: [string, string][] = [["x", "X (rojo)"], ["y", "Y (verde)"], ["z", "Z (azul)"]];
   if (f.kind === "linear") {
@@ -696,6 +759,12 @@ function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
     sec.append(exprField("X", () => f.cx, (v) => (f.cx = v), k("cx")));
     sec.append(exprField("Y", () => f.cy, (v) => (f.cy = v), k("cy")));
     sec.append(exprField("Z", () => f.cz, (v) => (f.cz = v), k("cz")));
+  } else if (f.kind === "path") {
+    const paths = doc.features.slice(0, idx).filter((x) => x.type === "sketch");
+    sec.append(selectField("Camino", f.path ?? "", [["", "Elige un boceto…"], ...paths.map((s) => [s.id, s.name] as [string, string])], (v) => (f.path = v)));
+    sec.append(exprField("Cantidad", () => f.count, (v) => (f.count = v), k("count"), { unit: " en total", hint: "repartidas a la misma distancia, de punta a punta" }));
+    sec.append(checkField("Girar con el camino", !!f.align, (v) => (f.align = v)));
+    sec.append(h("div", { class: "empty" }, "El camino es la primera línea abierta del boceto (herramienta «Camino», W) o, si no hay, su primer contorno. La primera copia es el original: ponlo al principio del camino."));
   } else {
     sec.append(selectField("Espejo", f.axis, [["x", "Plano YZ (refleja en X)"], ["y", "Plano XZ (refleja en Y)"], ["z", "Plano XY (refleja en Z)"]], (v) => (f.axis = v as Axis)));
     sec.append(exprField("Posición", () => f.offset, (v) => (f.offset = v), k("offset"), { hint: "dónde está el espejo en ese eje" }));
@@ -1077,10 +1146,13 @@ function renderSketchBar() {
   }
   const snap = h("button", { class: `btn small ${sketcher.snapOn ? "on" : ""}`, title: "Ajustar a la rejilla (Mayús lo suspende)", onclick: () => { sketcher.snapOn = !sketcher.snapOn; renderSketchBar(); } }, "# Rejilla");
   bar.append(snap, h("button", { class: "btn small", onclick: () => sketcher.fitView() }, "Encajar"));
+  if (sketcher.tool === "poly" || sketcher.tool === "path") bar.append(h("button", { class: "btn small", title: "Igual que Intro o doble clic", onclick: () => sketcher.finishPoly() }, "↵ Acabar línea"));
   bar.append(h("span", { class: "spacer" }));
   bar.append(h("button", { class: "btn small primary", onclick: () => setActive(null) }, "✓ Terminar boceto"));
   const consHint = sketcher.tool === "select" ? (n === 1 ? " · Mayús+clic en otro tramo para elegir dos" : n === 0 ? " · Clic en un tramo de unas líneas para ponerle restricciones" : "") : "";
-  $("#sketchhint").textContent = `${TOOL_HINT[sketcher.tool]}${consHint} · Rueda: zoom · Botón derecho o central: desplazar`;
+  const nav = sketcher.coarse ? " · Dos dedos: zoom y mover" : " · Rueda: zoom · Botón derecho o central: desplazar";
+  const hint = sketcher.coarse ? consHint.replace("Mayús+clic en otro tramo", "toca otro tramo") : consHint;
+  $("#sketchhint").textContent = `${TOOL_HINT[sketcher.tool]}${hint}${nav}`;
 }
 
 /** Pasa al editor 2D las aristas de la pieza vistas desde el plano del boceto */
@@ -1278,8 +1350,108 @@ function doExport(format: "stl" | "step" | "3mf") {
     download(m.data, `${safeName()}.${format}`, mime);
     rebuild();
   });
-  worker.postMessage({ kind: "export", seq: s, features: resolveDoc(doc).features, format });
+  worker.postMessage({ kind: "export", seq: s, features: resolveDoc(doc).features, format, colors: doc.colors });
 }
+
+// ---------- plano 2D con medidas ----------
+const VIEW_LABEL: Record<DrawingView["name"], string> = { front: "Frente", top: "Arriba", right: "Derecha", iso: "3D" };
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Hoja A4 apaisada (en mm) con las vistas, las medidas generales y el cajetín */
+function drawingSheet(views: DrawingView[]): string {
+  const W = 297, H = 210, M = 10;
+  const cellW = (W - 2 * M - 10) / 2, cellH = (H - 2 * M - 34) / 2;
+  const by = Object.fromEntries(views.map((v) => [v.name, v])) as Partial<Record<DrawingView["name"], DrawingView>>;
+  const size = (v: DrawingView) => [v.box[2] - v.box[0], v.box[3] - v.box[1]];
+  // misma escala en las tres vistas (para que se puedan medir con regla), con un número redondo
+  let need = Infinity;
+  for (const v of views) if (v.name !== "iso") { const [w, hh] = size(v); need = Math.min(need, (cellW - 30) / Math.max(w, 1e-3), (cellH - 22) / Math.max(hh, 1e-3)); }
+  const NICE = [20, 10, 5, 4, 2, 1, 0.5, 0.25, 0.2, 0.1, 0.05, 0.02, 0.01];
+  const sc = NICE.find((n) => n <= need) ?? 0.01;
+  const scaleTxt = sc >= 1 ? `${sc}:1` : `1:${Math.round(1 / sc)}`;
+  const out: string[] = [];
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}mm" height="${H}mm" font-family="Inter, system-ui, sans-serif">`);
+  out.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#fff"/>`);
+  out.push(`<rect x="${M / 2}" y="${M / 2}" width="${W - M}" height="${H - M}" fill="none" stroke="#000" stroke-width="0.5"/>`);
+  const cells: [DrawingView["name"], number, number][] = [["front", M, M], ["right", M + cellW + 10, M], ["top", M, M + cellH], ["iso", M + cellW + 10, M + cellH]];
+  const dim = (x1: number, y1: number, x2: number, y2: number, txt: string, vertical: boolean) => {
+    const a = 1.6;
+    const parts = [`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#000" stroke-width="0.18"/>`];
+    // flechas
+    if (vertical) parts.push(`<path d="M${x1} ${y1} l${-a / 3} ${a} h${(2 * a) / 3} Z M${x2} ${y2} l${-a / 3} ${-a} h${(2 * a) / 3} Z" fill="#000"/>`);
+    else parts.push(`<path d="M${x1} ${y1} l${a} ${-a / 3} v${(2 * a) / 3} Z M${x2} ${y2} l${-a} ${-a / 3} v${(2 * a) / 3} Z" fill="#000"/>`);
+    const tx = (x1 + x2) / 2, ty = (y1 + y2) / 2;
+    parts.push(vertical
+      ? `<text x="${tx - 1.2}" y="${ty}" font-size="3" text-anchor="middle" transform="rotate(-90 ${tx - 1.2} ${ty})">${txt}</text>`
+      : `<text x="${tx}" y="${ty - 1.2}" font-size="3" text-anchor="middle">${txt}</text>`);
+    return parts.join("");
+  };
+  const ext = (x1: number, y1: number, x2: number, y2: number) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#000" stroke-width="0.13"/>`;
+  const n = (v: number) => fmtEs(v, Math.abs(v - Math.round(v)) < 0.005 ? 0 : 2);
+  for (const [name, cx, cy] of cells) {
+    const v = by[name];
+    out.push(`<text x="${cx + 2}" y="${cy + 5}" font-size="3.4" font-weight="700">${VIEW_LABEL[name]}</text>`);
+    if (!v) continue;
+    const [w, hh] = size(v);
+    const k = name === "iso" ? Math.min((cellW - 12) / Math.max(w, 1e-3), (cellH - 14) / Math.max(hh, 1e-3)) : sc;
+    const ox = cx + (cellW - w * k) / 2 - v.box[0] * k, oy = cy + 6 + (cellH - 6 - hh * k) / 2 - v.box[1] * k;
+    const tr = `translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${k})`;
+    out.push(`<g transform="${tr}" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">`);
+    for (const d of v.hidden) out.push(`<path d="${d}" stroke-width="${0.18 / k}" stroke-dasharray="${1.2 / k} ${0.8 / k}" stroke="#555"/>`);
+    for (const d of v.visible) out.push(`<path d="${d}" stroke-width="${0.35 / k}"/>`);
+    out.push(`</g>`);
+    if (name === "iso") continue;
+    // medidas generales: ancho abajo, alto a la derecha
+    const x0 = ox + v.box[0] * k, x1 = ox + v.box[2] * k, y0 = oy + v.box[1] * k, y1 = oy + v.box[3] * k;
+    const gy = y1 + 6, gx = x1 + 6;
+    out.push(ext(x0, y1 + 1, x0, gy + 1), ext(x1, y1 + 1, x1, gy + 1), dim(x0, gy, x1, gy, n(w), false));
+    if (name !== "right") out.push(ext(x1 + 1, y0, gx + 1, y0), ext(x1 + 1, y1, gx + 1, y1), dim(gx, y0, gx, y1, n(hh), true));
+  }
+  // cajetín
+  const ty = H - M / 2 - 24, tx = W - M / 2 - 110;
+  const today = new Date().toLocaleDateString("es-ES");
+  out.push(`<g font-size="3.2"><rect x="${tx}" y="${ty}" width="110" height="24" fill="none" stroke="#000" stroke-width="0.4"/>`,
+    `<line x1="${tx}" y1="${ty + 10}" x2="${tx + 110}" y2="${ty + 10}" stroke="#000" stroke-width="0.25"/>`,
+    `<line x1="${tx + 55}" y1="${ty + 10}" x2="${tx + 55}" y2="${ty + 24}" stroke="#000" stroke-width="0.25"/>`,
+    `<text x="${tx + 3}" y="${ty + 7}" font-size="5" font-weight="700">${esc(doc.name || "Pieza")}</text>`,
+    `<text x="${tx + 3}" y="${ty + 16}">Escala ${scaleTxt}</text><text x="${tx + 3}" y="${ty + 21}">Medidas en mm</text>`,
+    `<text x="${tx + 58}" y="${ty + 16}">${today}</text><text x="${tx + 58}" y="${ty + 21}">Hecho con Geometría</text></g>`);
+  out.push(`<text x="${M}" y="${H - M / 2 - 2}" font-size="2.6" fill="#555">Líneas discontinuas: aristas ocultas. Las vistas 2D están a la misma escala; la 3D, no.</text>`);
+  out.push("</svg>");
+  return out.join("");
+}
+
+function drawingDialog() {
+  if (!engineReady) return toast("El motor aún está cargando");
+  if (!build?.bodies.length) return toast("Todavía no hay ninguna pieza que dibujar");
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const preview = h("div", { class: "sheet" }, h("div", { class: "empty" }, "Dibujando las vistas…"));
+  const actions = h("div", { class: "actions" });
+  dlg.append(h("h2", {}, "Plano con medidas"), preview, actions);
+  if (!dlg.open) dlg.showModal();
+  const s = ++seq;
+  drawingWaiters.set(s, (m) => {
+    rebuild();
+    if (!m.views?.length) { preview.innerHTML = ""; preview.append(h("div", { class: "msg err" }, "No se pudo dibujar: " + (m.error ?? "sin vistas"))); return; }
+    const svg = drawingSheet(m.views);
+    preview.innerHTML = svg;
+    actions.append(
+      h("button", { class: "btn primary", onclick: () => {
+        $("#printarea").innerHTML = svg;
+        dlg.close();
+        // el navegador ofrece «Guardar como PDF» en el diálogo de imprimir
+        setTimeout(() => window.print(), 50);
+      } }, "Imprimir o guardar PDF"),
+      h("button", { class: "btn", onclick: () => download(svg, `${safeName()}-plano.svg`, "image/svg+xml") }, "Descargar SVG"),
+      h("span", { class: "spacer" }),
+      h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar"),
+    );
+  });
+  worker.postMessage({ kind: "drawing", seq: s, features: resolveDoc(doc).features });
+}
+$("#drawing").addEventListener("click", drawingDialog);
+window.addEventListener("afterprint", () => { $("#printarea").innerHTML = ""; });
 
 function openDialog() {
   const dlg = $("#dlg") as HTMLDialogElement;
@@ -1351,6 +1523,7 @@ for (const m of document.querySelectorAll<HTMLElement>(".menu")) {
 document.addEventListener("click", () => document.querySelectorAll(".menu").forEach((x) => x.classList.remove("open")));
 $("#m-file").querySelectorAll<HTMLElement>("[data-a]").forEach((b) => b.addEventListener("click", () => fileAction(b.dataset.a!)));
 $("#m-export").querySelectorAll<HTMLElement>("[data-f]").forEach((b) => b.addEventListener("click", () => doExport(b.dataset.f as never)));
+$("#viewsel").addEventListener("change", (e) => { const sel = e.target as HTMLSelectElement; if (sel.value) viewport.view(sel.value as ViewName); sel.value = ""; });
 document.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.addEventListener("click", () => (b.dataset.v === "fit" ? viewport.fit() : viewport.view(b.dataset.v as ViewName))));
 
 // perspectiva / isométrica (se recuerda en este navegador)
