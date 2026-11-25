@@ -421,6 +421,14 @@ export interface Doc {
   dims?: DrawingDim[];
   /** Ficha BIM de cada cuerpo (id del cuerpo → material, cantidad…) */
   bim?: Record<string, BodyInfo>;
+  /** Familia: la misma pieza en varios tamaños */
+  family?: Family;
+}
+
+/** Tabla de tamaños: qué variables cambian y sus valores en cada fila */
+export interface Family {
+  vars: string[];
+  rows: { name: string; values: Record<string, Expr> }[];
 }
 
 /** Ficha de una pieza para el listado: material, si se imprime o se compra, cantidad… */

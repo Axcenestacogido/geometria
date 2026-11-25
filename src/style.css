@@ -364,3 +364,12 @@ table.bom { border-collapse: collapse; width: 100%; font-size: 13px; }
 /* relieve desde imagen */
 .relief-file { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
 .relief-file .relief-pic { width: 64px; height: 64px; object-fit: contain; background: #fff; border: 1px solid var(--line, #ccc); border-radius: 6px; }
+
+/* vista explosionada (encima del panel de corte si están los dos) */
+.explpanel { bottom: 56px; }
+@media (max-width: 700px) { .explpanel { bottom: calc(140px + env(safe-area-inset-bottom)); } }
+/* familia de tamaños */
+.fam-vars { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 10px; }
+table.fam input { width: 100%; min-width: 60px; }
+table.fam tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.fam-act { white-space: nowrap; }

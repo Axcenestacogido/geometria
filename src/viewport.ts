@@ -111,6 +111,7 @@ export class Viewport {
     el.addEventListener("pointermove", (e) => this.hover(e));
 
     const loop = () => {
+      this.anim?.(performance.now());
       this.controls.update();
       // la luz principal sale siempre desde un poco por encima de la cámara
       const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
@@ -124,6 +125,122 @@ export class Viewport {
   }
 
   get isOrtho() { return this.camera === this.ortho; }
+
+  // ---------- vista explosionada ----------
+  private explodeK = 0;
+  private explodeMode: "center" | "up" = "center";
+  /** algo que se mueve en cada fotograma (el vídeo) */
+  private anim: ((t: number) => void) | null = null;
+
+  /** Separa los cuerpos: k = 0 juntos, 1 = separados del todo. «up» = apilados hacia arriba */
+  setExplode(k: number, mode: "center" | "up" = this.explodeMode) {
+    this.explodeK = Math.max(0, k);
+    this.explodeMode = mode;
+    this.applyExplode();
+  }
+  get exploded() { return this.explodeK > 0; }
+  /** Encuadra con las piezas separadas del todo */
+  fitExploded() {
+    const k = this.explodeK;
+    this.setExplode(1);
+    this.fit();
+    this.setExplode(k);
+  }
+
+  private applyExplode() {
+    const kids = this.bodiesGroup.children;
+    const boxes = new Map<string, THREE.Box3>();
+    for (const c of kids) {
+      const m = c as THREE.Mesh;
+      if (!m.isMesh || c.userData.cap) continue;
+      m.geometry.computeBoundingBox();
+      const bb = boxes.get(c.userData.body) ?? new THREE.Box3();
+      bb.union(m.geometry.boundingBox!);
+      boxes.set(c.userData.body, bb);
+    }
+    const all = new THREE.Box3();
+    boxes.forEach((bb) => all.union(bb));
+    const size = all.isEmpty() ? 50 : all.getSize(new THREE.Vector3()).length();
+    const center = all.isEmpty() ? new THREE.Vector3() : all.getCenter(new THREE.Vector3());
+    const off = new Map<string, THREE.Vector3>();
+    if (this.explodeMode === "up") {
+      // apilados: cada cuerpo sube según su orden de abajo a arriba
+      const order = [...boxes.entries()].sort((a, b) => a[1].getCenter(new THREE.Vector3()).z - b[1].getCenter(new THREE.Vector3()).z);
+      const step = (all.isEmpty() ? 20 : all.getSize(new THREE.Vector3()).z * 0.6 + 10) * this.explodeK;
+      order.forEach(([id], i) => off.set(id, new THREE.Vector3(0, 0, i * step)));
+    } else {
+      boxes.forEach((bb, id) => {
+        const d = bb.getCenter(new THREE.Vector3()).sub(center);
+        // si un cuerpo está justo en el centro, sube un poco para que se vea
+        if (d.length() < size * 0.02) d.set(0, 0, 1);
+        // cada pieza se aleja en su dirección: un tramo fijo (para que se separen las que están pegadas) más su distancia al centro
+        const dist = d.length();
+        off.set(id, d.normalize().multiplyScalar((size * 0.45 + dist) * this.explodeK));
+      });
+    }
+    for (const c of kids) c.position.copy(off.get(c.userData.body) ?? new THREE.Vector3());
+    // los marcadores y choques dejan de cuadrar al separar: se esconden
+    for (const g of [this.markGroup, this.clashGroup, this.checkGroup, this.measureGroup]) g.visible = this.explodeK === 0;
+  }
+
+  /** Formato de vídeo que sabe grabar este navegador */
+  static videoType(): string | null {
+    if (typeof MediaRecorder === "undefined") return null;
+    for (const t of ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"]) if (MediaRecorder.isTypeSupported(t)) return t;
+    return null;
+  }
+
+  /**
+   * Graba un vídeo corto: se separan las piezas, la cámara da una vuelta y se vuelven a juntar.
+   * Devuelve el vídeo (MP4 o WebM según el navegador).
+   */
+  recordExplode(seconds = 8, onProgress?: (f: number) => void): Promise<Blob> {
+    const type = Viewport.videoType();
+    if (!type) return Promise.reject(new Error("este navegador no sabe grabar vídeo"));
+    const canvas = this.renderer.domElement;
+    const stream = canvas.captureStream(30);
+    const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 6_000_000 });
+    const chunks: Blob[] = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const kWas = this.explodeK;
+    const camWas = this.camera.position.clone(), targetWas = this.controls.target.clone();
+    // encuadre con las piezas separadas del todo, para que no se salgan
+    this.setExplode(1);
+    this.fit();
+    this.setExplode(0);
+    const target = this.controls.target.clone();
+    const start = this.camera.position.clone().sub(target);
+    const hide = [this.sketchGroup, this.refGroup];
+    const was = hide.map((o) => o.visible);
+    hide.forEach((o) => (o.visible = false));
+    const ease = (x: number) => 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, x))) / 2;
+    return new Promise((res, rej) => {
+      let t0 = 0;
+      rec.onstop = () => {
+        this.anim = null;
+        hide.forEach((o, i) => (o.visible = was[i]));
+        this.controls.target.copy(targetWas);
+        this.camera.position.copy(camWas);
+        this.setExplode(kWas);
+        res(new Blob(chunks, { type: type.split(";")[0] }));
+      };
+      rec.onerror = () => { this.anim = null; rej(new Error("falló la grabación")); };
+      this.anim = (now) => {
+        if (!t0) t0 = now;
+        const f = (now - t0) / (seconds * 1000);
+        onProgress?.(Math.min(1, f));
+        // 0–30 %: se separan · 30–75 %: vuelta de cámara · 75–100 %: se juntan
+        const k = f < 0.3 ? ease(f / 0.3) : f < 0.75 ? 1 : 1 - ease((f - 0.75) / 0.25);
+        this.setExplode(k);
+        const ang = ease(Math.min(1, f / 0.9)) * Math.PI * 2;
+        const p = start.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), ang);
+        this.camera.position.copy(target).add(p);
+        this.camera.lookAt(target);
+        if (f >= 1 && rec.state === "recording") { this.anim = null; rec.stop(); }
+      };
+      rec.start(250);
+    });
+  }
 
   applyTheme() {
     this.scene.background = new THREE.Color(css("--view-bg"));
@@ -334,6 +451,7 @@ export class Viewport {
       this.bodiesGroup.add(mesh, lines, cap);
     }
     this.applyClip();
+    this.applyExplode();
     if (this.needsFit && bodies.length) {
       this.needsFit = false;
       this.fit();
