@@ -49,6 +49,7 @@ export class Viewport {
   private sketchGroup = new THREE.Group();
   private markGroup = new THREE.Group();
   private measureGroup = new THREE.Group();
+  private checkGroup = new THREE.Group();
   private grid!: THREE.GridHelper;
   private axes!: THREE.Group;
   private hoverObj: THREE.Object3D | null = null;
@@ -77,7 +78,7 @@ export class Viewport {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x445566, 1.4);
     hemi.position.set(0, 0, 1);
     this.light = new THREE.DirectionalLight(0xffffff, 1.6);
-    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup);
+    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup);
     this.buildGrid(200);
     this.applyTheme();
 
@@ -209,6 +210,24 @@ export class Viewport {
       this.needsFit = false;
       this.fit();
     }
+  }
+
+  /** Comprobación para imprimir: zonas coloreadas y el volumen de la cama */
+  setCheck(c: { layers: { tris: Float32Array; color: string }[]; bed: [number, number, number] } | null) {
+    this.clearGroup(this.checkGroup);
+    if (!c) return;
+    for (const l of c.layers) {
+      if (!l.tris.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(l.tris, 3));
+      this.checkGroup.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        color: new THREE.Color(l.color), transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      })));
+    }
+    const [x, y, z] = c.bed;
+    const box = new THREE.Box3(new THREE.Vector3(-x / 2, -y / 2, 0), new THREE.Vector3(x / 2, y / 2, z));
+    this.checkGroup.add(new THREE.Box3Helper(box, new THREE.Color(css("--muted"))));
   }
 
   /** Contornos de bocetos (en 3D) */

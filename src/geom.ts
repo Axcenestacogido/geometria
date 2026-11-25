@@ -29,9 +29,10 @@ export const STD: Record<"XY" | "XZ" | "YZ", { x: Vec3; n: Vec3 }> = {
   YZ: { x: [0, 1, 0], n: [1, 0, 0] },
 };
 
-type ResolvedPlane =
+type ResolvedPlane = (
   | { kind: "std"; name: "XY" | "XZ" | "YZ"; offset: number }
-  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: number };
+  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: number }
+) & { tilt?: number; turn?: number };
 
 export function planeBasis(p: ResolvedPlane): Basis {
   let origin: Vec3, x: Vec3, n: Vec3;
@@ -44,7 +45,19 @@ export function planeBasis(p: ResolvedPlane): Basis {
     n = norm(p.normal);
   }
   origin = add(origin, scale(n, p.offset || 0));
-  const y = cross(n, x);
+  let y = cross(n, x);
+  // inclinar: girar el plano alrededor de su eje X (como abrir una tapa)
+  const t = ((p.tilt || 0) * Math.PI) / 180;
+  if (t) {
+    const [c, s] = [Math.cos(t), Math.sin(t)];
+    [y, n] = [add(scale(y, c), scale(n, s)), add(scale(n, c), scale(y, -s))];
+  }
+  // girar el dibujo dentro del plano (alrededor de la normal)
+  const r = ((p.turn || 0) * Math.PI) / 180;
+  if (r) {
+    const [c, s] = [Math.cos(r), Math.sin(r)];
+    [x, y] = [add(scale(x, c), scale(y, s)), add(scale(y, c), scale(x, -s))];
+  }
   return { origin, x, y, n };
 }
 

@@ -2,8 +2,10 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature,
+  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature,
 } from "./types";
+import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
+import { TEMPLATES } from "./templates";
 import { files, fileId, toBase64, fromBase64 } from "./files";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
@@ -26,6 +28,8 @@ let doc: Doc = storage.load(docId) ?? exampleDoc();
 const history = new History(JSON.stringify(doc));
 let active: string | null = null; // paso que se está editando
 let pickingFace = false;
+/** en redondeo/chaflán: true = se eligen caras enteras en vez de aristas */
+let pickFacesForEdges = false;
 let resolved: ResolveOut = resolveDoc(doc);
 let build: BuildResult | null = null;
 let engineReady = false;
@@ -64,6 +68,7 @@ $("#app").innerHTML = `
     <button data-a="new">Pieza nueva</button>
     <button data-a="open">Abrir pieza guardada…</button>
     <button data-a="example">Abrir el ejemplo</button>
+    <button data-a="templates">Plantillas…<small>Caja con tapa, bisagra, tornillo y tuerca</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
     <button data-a="save-file">Descargar proyecto (.json)<small>Para guardarlo o pasarlo a otro equipo</small></button>
     <button data-a="load-file">Cargar proyecto (.json)…</button>
@@ -165,8 +170,8 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
 };
 
 /** Pasos que, mientras los editas, muestran la pieza como estaba antes de ellos */
-const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod", "text"]);
-const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text"]);
+const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod", "text", "layflat"]);
+const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text", "layflat"]);
 
 /** Archivos importados que el motor ya tiene */
 const sentFiles = new Set<string>();
@@ -257,15 +262,19 @@ const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
   { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
+  { type: "component" }, { type: "layflat" },
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
+  component: "Pieza", layflat: "Apoyar",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
   loft: "Transición suave entre dos o más bocetos (de cuadrado a círculo…)",
   text: "Letras en relieve o grabadas",
   import: "Traer una pieza STEP o STL de otro programa",
+  component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
+  layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
 };
 
 function renderTools() {
@@ -275,12 +284,12 @@ function renderTools() {
   const hasBody = !!build?.bodies.length;
   for (const t of ADD) {
     const needSketch = t.type === "extrude" || t.type === "revolve" || t.type === "sweep" || t.type === "loft";
-    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod"].includes(t.type);
+    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat"].includes(t.type);
     box.append(h("button", {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
       title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : ADD_TITLE[t.type] ?? "",
-      onclick: () => (t.type === "import" ? $("#file3d").click() : addFeature(t.type)),
+      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "component" ? componentDialog() : addFeature(t.type)),
     }, h("b", {}, FEATURE_ICON[t.type]), ADD_LABEL[t.type] ?? FEATURE_LABEL[t.type]));
   }
 }
@@ -305,7 +314,7 @@ function setActive(id: string | null) {
     sketcher.close();
   }
   if (measuring) stopMeasure();
-  viewport.pickMode = f?.type === "fillet" || f?.type === "chamfer" ? "edge" : f && FACE_PICK_TYPES.has(f.type) ? "face" : "none";
+  viewport.pickMode = f?.type === "fillet" || f?.type === "chamfer" ? (pickFacesForEdges ? "face" : "edge") : f && FACE_PICK_TYPES.has(f.type) ? "face" : "none";
   renderTree();
   renderProps();
   renderBanner();
@@ -397,7 +406,7 @@ function renameVarUses(old: string, nu: string) {
     if (Array.isArray(o)) return o.map(walk);
     if (o && typeof o === "object") {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(o)) out[k] = ["id", "name", "type", "sketch", "target", "path", "sketches", "text", "file", "fileName"].includes(k) ? v : walk(v);
+      for (const [k, v] of Object.entries(o)) out[k] = ["id", "name", "type", "sketch", "target", "path", "sketches", "text", "file", "fileName", "source", "sourceId", "resolved"].includes(k) ? v : walk(v);
       return out;
     }
     return o;
@@ -479,7 +488,7 @@ const fmtEs = (n: number, d = 1) => n.toLocaleString("es-ES", { maximumFractionD
 /** Volumen, tamaño, peso y filamento de la pieza (se ve cuando no hay ningún paso elegido) */
 function renderPieceInfo() {
   const box = document.getElementById("piece-info");
-  if (!box) return;
+  if (!box) { viewport.setCheck(null); return; }
   box.innerHTML = "";
   box.append(h("h3", {}, "Tu pieza"));
   const bodies = build?.bodies ?? [];
@@ -504,6 +513,56 @@ function renderPieceInfo() {
     h("div", { class: "empty" }, "Calculado como si se imprimiera maciza (100 % de relleno). Con el relleno normal de tu laminador gastará bastante menos."),
   );
   if (bodies.length > 1) box.append(h("div", { class: "empty" }, `Suma de ${bodies.length} cuerpos.`));
+  renderPrintCheck(box);
+}
+
+// ---------- comprobación para imprimir ----------
+const PRINT_KEY = "geometria:impresion";
+let printOn = false;
+let printSt: PrintSettings = { ...DEFAULT_PRINT };
+try { printSt = { ...DEFAULT_PRINT, ...JSON.parse(localStorage.getItem(PRINT_KEY) || "{}") }; } catch { /* sin almacenamiento */ }
+
+function renderPrintCheck(box: HTMLElement) {
+  box.append(h("h3", { class: "mt" }, "Para imprimir",
+    h("button", { class: `btn small ${printOn ? "on" : ""}`, onclick: () => { printOn = !printOn; renderPieceInfo(); } }, printOn ? "Ocultar" : "Comprobar")));
+  const bodies = build?.bodies ?? [];
+  if (!printOn || !bodies.length) { viewport.setCheck(null); return; }
+  const r = checkPrint(bodies, printSt);
+  const ok = (good: boolean, text: string) => h("div", { class: `msg ${good ? "info" : "err"}` }, (good ? "✓ " : "⚠ ") + text);
+  box.append(ok(r.fits, r.fits
+    ? `Cabe en la cama (${printSt.bedX} × ${printSt.bedY} × ${printSt.bedZ} mm).`
+    : r.fitsRotated ? "No cabe así, pero sí girándola 90° en la cama." : `No cabe en la cama de ${printSt.bedX} × ${printSt.bedY} × ${printSt.bedZ} mm.`));
+  if (Math.abs(r.floating) > 0.01) box.append(ok(false, `La parte más baja está en Z = ${fmtEs(r.floating, 2)}, no en la cama. El laminador la bajará, pero usa «Apoyar» para elegir la cara.`));
+  box.append(ok(r.overhangArea < 1, r.overhangArea < 1
+    ? `Sin voladizos de más de ${printSt.maxOverhang}°.`
+    : `Voladizos de más de ${printSt.maxOverhang}° (en rojo): ${fmtEs(r.overhangArea / 100, 1)} cm². Necesitarán soportes o girar la pieza.`));
+  box.append(ok(r.thinArea < 0.5, r.thinArea < 0.5
+    ? `Sin paredes de menos de ${fmtEs(printSt.minWall, 1)} mm${r.sampled ? " (mirado en una muestra)" : ""}.`
+    : `Paredes de menos de ${fmtEs(printSt.minWall, 1)} mm (en morado): ${fmtEs(r.thinArea, 0)} mm². Pueden salir huecas o romperse.`));
+  if (!doc.features.some((x) => x.type === "layflat")) {
+    box.append(h("button", { class: "btn small", onclick: () => { const f = newFeature(doc, "layflat"); doc.features.push(f); changed(true, true); toast("Apoyada sobre su cara más grande"); } }, "⤓ Apoyar sobre la cara más grande"));
+  }
+  // ajustes de la impresora
+  const num = (label: string, key: keyof PrintSettings, unit: string) => {
+    const i = h("input", { value: String(printSt[key]), inputmode: "decimal" }) as HTMLInputElement;
+    i.addEventListener("change", () => {
+      const v = Number(i.value.replace(",", "."));
+      if (!(v > 0)) { i.classList.add("bad"); return; }
+      printSt = { ...printSt, [key]: v };
+      try { localStorage.setItem(PRINT_KEY, JSON.stringify(printSt)); } catch { /* nada */ }
+      renderPieceInfo();
+    });
+    return h("div", { class: "field" }, h("label", {}, `${label} (${unit})`), i);
+  };
+  const det = h("details", { class: "mt" }, h("summary", {}, "Ajustes de tu impresora"),
+    num("Cama X", "bedX", "mm"), num("Cama Y", "bedY", "mm"), num("Alto", "bedZ", "mm"),
+    num("Pared mínima", "minWall", "mm"), num("Voladizo máx.", "maxOverhang", "°"),
+    h("div", { class: "empty" }, "Por defecto, la cama de 256 mm de las Bambu A1, P1 y X1. Pon la de tu impresora."));
+  box.append(det);
+  viewport.setCheck({
+    layers: [{ tris: r.overhangTris, color: "#d9452b" }, { tris: r.thinTris, color: "#8a4fd8" }],
+    bed: [printSt.bedX, printSt.bedY, printSt.bedZ],
+  });
 }
 
 function renderProps() {
@@ -570,8 +629,25 @@ function renderProps() {
     case "fillet":
     case "chamfer": {
       sec.append(exprField(f.type === "fillet" ? "Radio" : "Distancia", () => f.size, (v) => (f.size = v), k("size")));
-      sec.append(h("div", { class: "msg info" }, `Haz clic en las aristas de la vista 3D para elegirlas (otro clic la quita). Elegidas: ${f.edges.length}.`));
-      if (f.edges.length) sec.append(h("button", { class: "btn small", onclick: () => { f.edges = []; changed(true, true); renderMarks(); } }, "Quitar todas"));
+      sec.append(h("div", { class: "seg-btns" },
+        h("button", { class: `btn small ${pickFacesForEdges ? "" : "on"}`, onclick: () => { pickFacesForEdges = false; setActive(f.id); } }, "Elegir aristas"),
+        h("button", { class: `btn small ${pickFacesForEdges ? "on" : ""}`, onclick: () => { pickFacesForEdges = true; setActive(f.id); } }, "Elegir caras enteras"),
+      ));
+      sec.append(h("div", { class: "msg info" }, pickFacesForEdges
+        ? `Clic en una cara: se ${f.type === "fillet" ? "redondean" : "achaflanan"} todas sus aristas (otro clic la quita). Caras: ${f.faces?.length ?? 0}.`
+        : `Haz clic en las aristas de la vista 3D para elegirlas (otro clic la quita). Aristas: ${f.edges.length}.`));
+      if (f.edges.length || f.faces?.length) sec.append(h("button", { class: "btn small", onclick: () => { f.edges = []; delete f.sizes; delete f.faces; changed(true, true); renderMarks(); } }, "Quitar todas"));
+      if (f.edges.length) {
+        sec.append(h("h3", { class: "mt" }, "Medida de cada arista"));
+        sec.append(h("div", { class: "empty" }, "Vacío = la medida general. Así puedes poner radios distintos."));
+        f.edges.forEach((_, i) => {
+          const inp = exprInline(() => f.sizes?.[i] ?? "", (v) => { const a = (f.sizes ??= []); while (a.length < f.edges.length) a.push(""); a[i] = v; });
+          inp.placeholder = f.size;
+          sec.append(h("div", { class: "field" }, h("label", {}, `Arista ${i + 1}`),
+            h("div", { class: "row-pt" }, inp, h("span"),
+              h("button", { class: "btn small", title: "Quitar", onclick: () => { f.edges.splice(i, 1); f.sizes?.splice(i, 1); changed(true, true); renderMarks(); } }, "✕"))));
+        });
+      }
       sec.append(h("div", { class: "empty mt" }, "Mientras editas este paso ves la pieza como estaba antes de él. Pulsa «Hecho» para ver el resultado."));
       break;
     }
@@ -589,6 +665,8 @@ function renderProps() {
     case "sweep": renderSweepProps(sec, f); break;
     case "loft": renderLoftProps(sec, f); break;
     case "import": renderImportProps(sec, f); break;
+    case "layflat": renderLayFlatProps(sec, f); break;
+    case "component": renderComponentProps(sec, f); break;
   }
   sec.append(h("div", { class: "actions" },
     h("button", { class: "btn primary", onclick: () => setActive(null) }, "Hecho"),
@@ -779,6 +857,84 @@ $("#filesvg").addEventListener("change", async (e) => {
   w.select();
 });
 
+function renderLayFlatProps(sec: HTMLElement, f: LayFlatFeature) {
+  sec.append(h("div", { class: "msg info" }, f.face
+    ? "La pieza se apoya sobre la cara que elegiste. Otro clic en una cara la cambia."
+    : "La pieza se apoya sobre su cara plana más grande. Si prefieres otra, haz clic en ella."));
+  if (f.face) sec.append(h("button", { class: "btn small", onclick: () => { f.face = null; changed(true, true); } }, "Usar la cara más grande"));
+  sec.append(h("div", { class: "empty mt" }, "Gira todos los cuerpos, los baja a la cama (Z = 0) y los centra. Déjalo como último paso: los pasos de después verían la pieza ya girada. Mientras lo editas ves la pieza sin girar."));
+}
+
+function renderComponentProps(sec: HTMLElement, f: ComponentFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  sec.append(h("div", { class: "msg info" }, `Copia de «${f.source.name}» (${f.source.features.length} pasos).`));
+  sec.append(h("button", { class: "btn small", title: "Vuelve a copiar la pieza guardada, por si la cambiaste", onclick: () => {
+    const d = storage.load(f.sourceId);
+    if (!d) return toast("Esa pieza ya no está guardada en este navegador");
+    f.source = { name: d.name, variables: d.variables, features: d.features };
+    changed(true, true);
+    toast("Pieza actualizada");
+  } }, "Actualizar desde la pieza guardada"));
+  if (f.source.variables.length) {
+    sec.append(h("h3", { class: "mt" }, "Medidas de la pieza"));
+    sec.append(h("div", { class: "empty" }, "Vacío = la suya. Puedes usar las variables de esta pieza."));
+    for (const v of f.source.variables) {
+      const inp = exprInline(() => f.params[v.name] ?? "", (val) => { if (val.trim()) f.params[v.name] = val; else delete f.params[v.name]; });
+      inp.placeholder = v.value;
+      sec.append(h("div", { class: "field" }, h("label", {}, v.name), inp));
+    }
+  }
+  sec.append(h("h3", { class: "mt" }, "Colocar"));
+  sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+  sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+  sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+  sec.append(exprField("Giro (Z)", () => f.rz, (v) => (f.rz = v), k("rz"), { unit: "°" }));
+  sec.append(...opFields(f));
+}
+
+/** Elegir una pieza guardada para meterla dentro de esta */
+function componentDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const list = storage.list().filter((m) => m.id !== docId);
+  dlg.append(h("h2", {}, "Meter una pieza guardada"));
+  dlg.append(h("p", { class: "empty" }, "Se mete una copia, con sus variables cambiables. Si luego cambias la original, pulsa «Actualizar» en el paso."));
+  const box = h("div", { class: "list" });
+  if (!list.length) box.append(h("div", { class: "empty" }, "No hay otras piezas guardadas. Haz una, y aparecerá aquí."));
+  for (const m of list) {
+    box.append(h("div", { class: "it" },
+      h("span", { onclick: () => {
+        const d = storage.load(m.id);
+        dlg.close();
+        if (!d) return;
+        const f = newFeature(doc, "component") as ComponentFeature;
+        Object.assign(f, { name: d.name, sourceId: m.id, source: { name: d.name, variables: d.variables, features: d.features } });
+        doc.features.push(f);
+        setActive(f.id);
+        changed(true, true);
+      } }, m.name, " ", h("small", {}, `${d_count(m.id)} pasos`)),
+    ));
+  }
+  dlg.append(box, h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar")));
+  dlg.showModal();
+}
+const d_count = (id: string) => storage.load(id)?.features.length ?? 0;
+
+function templatesDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  dlg.append(h("h2", {}, "Plantillas"));
+  dlg.append(h("p", { class: "empty" }, "Cada una se abre como pieza nueva, con variables para cambiar medidas y holguras."));
+  const box = h("div", { class: "list" });
+  for (const t of TEMPLATES) {
+    box.append(h("div", { class: "it" },
+      h("span", { onclick: () => { dlg.close(); setDoc(t.make(), uid()); toast(`Plantilla «${t.name}» abierta`); } }, t.name, h("small", { class: "block" }, t.info)),
+    ));
+  }
+  dlg.append(box, h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  dlg.showModal();
+}
+
 let replacingImport: string | null = null;
 $("#file3d").addEventListener("change", async (e) => {
   const input = e.target as HTMLInputElement;
@@ -821,9 +977,11 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
   const planeOpts: [string, string][] = [["XY", "Suelo (XY)"], ["XZ", "Frente (XZ)"], ["YZ", "Lado (YZ)"]];
   if (pl.kind === "face") planeOpts.push(["face", "Cara elegida"]);
   sec.append(selectField("Plano", pl.kind === "std" ? pl.name : "face", planeOpts, (v) => {
-    if (v !== "face") f.plane = { kind: "std", name: v as StdPlane, offset: f.plane.offset };
+    if (v !== "face") f.plane = { kind: "std", name: v as StdPlane, offset: f.plane.offset, tilt: f.plane.tilt, turn: f.plane.turn };
   }));
   sec.append(exprField("Desfase", () => f.plane.offset, (v) => (f.plane.offset = v), `${f.id}:offset`, { hint: "separa el plano en su normal" }));
+  sec.append(exprField("Inclinación", () => f.plane.tilt ?? "0", (v) => (f.plane.tilt = v), `${f.id}:tilt`, { unit: "°", hint: "gira el plano sobre su eje X (rojo)" }));
+  sec.append(exprField("Giro", () => f.plane.turn ?? "0", (v) => (f.plane.turn = v), `${f.id}:turn`, { unit: "°", hint: "gira el dibujo dentro del plano" }));
   sec.append(h("div", { class: "seg-btns" },
     h("button", { class: "btn small", onclick: startFacePick }, "Dibujar sobre una cara de la pieza…"),
     h("button", { class: "btn small", title: "Traer un dibujo de Inkscape, Illustrator, Figma…", onclick: () => $("#filesvg").click() }, "Importar SVG…"),
@@ -959,6 +1117,20 @@ function startFacePick() {
 
 viewport.events.onFacePick = (point, normal) => {
   const f = doc.features.find((x) => x.id === active);
+  if (f?.type === "layflat") {
+    f.face = point.map((c) => Math.round(c * 1000) / 1000) as Vec3;
+    changed(true, true);
+    return;
+  }
+  if (f?.type === "fillet" || f?.type === "chamfer") {
+    const list = (f.faces ??= []);
+    const near = list.findIndex((q) => Math.hypot(q[0] - point[0], q[1] - point[1], q[2] - point[2]) < 3);
+    if (near >= 0) list.splice(near, 1);
+    else list.push(point.map((c) => Math.round(c * 1000) / 1000) as Vec3);
+    if (!list.length) delete f.faces;
+    changed(true, true);
+    return;
+  }
   if (f?.type === "shell") {
     // otro clic cerca de un punto ya elegido lo quita
     const near = f.faces.findIndex((q) => Math.hypot(q[0] - point[0], q[1] - point[1], q[2] - point[2]) < 3);
@@ -998,7 +1170,7 @@ viewport.events.onEdgePick = (p) => {
   // si ya estaba elegida (punto muy cerca de la misma arista), quitarla
   const near = f.edges.findIndex((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 2);
   const round = (v: Vec3) => v.map((c) => Math.round(c * 1000) / 1000) as Vec3;
-  if (near >= 0) f.edges.splice(near, 1);
+  if (near >= 0) { f.edges.splice(near, 1); f.sizes?.splice(near, 1); }
   else f.edges.push(round(p));
   changed(true, true);
   renderMarks();
@@ -1025,13 +1197,16 @@ function renderBanner() {
     b.append(txt, h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
   } else if (f && (f.type === "fillet" || f.type === "chamfer")) {
     b.hidden = false;
-    b.textContent = `${f.name}: elige aristas con un clic`;
+    b.textContent = pickFacesForEdges ? `${f.name}: elige caras con un clic` : `${f.name}: elige aristas con un clic`;
   } else if (f?.type === "shell") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en la cara que queda abierta`;
   } else if (f?.type === "hole" || f?.type === "rod") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en una cara para colocar cada uno`;
+  } else if (f?.type === "layflat") {
+    b.hidden = false;
+    b.textContent = `${f.name}: clic en la cara que irá sobre la cama`;
   } else if (f?.type === "text") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en una cara para colocar el texto`;
@@ -1050,7 +1225,7 @@ function renderMarks() {
     : [];
   viewport.setMarks({
     edges: f && (f.type === "fillet" || f.type === "chamfer") ? f.edges : [],
-    faces: f?.type === "shell" ? f.faces : [],
+    faces: f?.type === "shell" ? f.faces : f && (f.type === "fillet" || f.type === "chamfer") ? f.faces ?? [] : f?.type === "layflat" && f.face ? [f.face] : [],
     pins,
     plane: pickingFace ? null : plane,
   });
@@ -1139,6 +1314,7 @@ function fileAction(a: string) {
   else if (a === "example") setDoc(exampleDoc(), uid());
   else if (a === "dup") { const d: Doc = JSON.parse(JSON.stringify(doc)); d.name += " (copia)"; setDoc(d, uid()); toast("Copia creada"); }
   else if (a === "open") openDialog();
+  else if (a === "templates") templatesDialog();
   else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();
 }

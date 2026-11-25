@@ -192,3 +192,5 @@ kbd { font: 11px ui-monospace, monospace; background: var(--panel-2); border: 1p
 .sketch-svg .cons text { fill: var(--accent); font-size: 11px; font-weight: 700; }
 .sketch-svg .cons:hover rect { fill: var(--danger); stroke: var(--danger); }
 .sketch-svg .cons:hover text { fill: #fff; }
+.list small.block { display: block; margin-top: 2px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin: 6px 0; }

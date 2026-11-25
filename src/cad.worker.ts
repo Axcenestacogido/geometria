@@ -282,10 +282,12 @@ function segDist(p: Vec3, a: Vec3, b: Vec3) {
 const EDGE_TOL = 0.6; // mm
 
 function applyEdgeOp(bodies: Body[], f: Extract<RF, { type: "fillet" | "chamfer" }>) {
-  if (!f.edges.length) throw new Error("elige al menos una arista en la vista 3D");
+  const faces = f.faces ?? [];
+  if (!f.edges.length && !faces.length) throw new Error("elige aristas (o caras) en la vista 3D");
   if (f.size <= 0) throw new Error("la medida debe ser mayor que 0");
-  let found = 0;
-  const lost: number[] = [];
+  const sizes = f.sizes ?? [];
+  if (sizes.some((x) => x < 0)) throw new Error("las medidas deben ser mayores que 0");
+  const lost: string[] = [];
   const picks = f.edges.map(() => ({ body: -1, edge: -1, d: Infinity }));
   bodies.forEach((b, bi) => {
     b.shape.edges.forEach((e, ei) => {
@@ -295,26 +297,40 @@ function applyEdgeOp(bodies: Body[], f: Extract<RF, { type: "fillet" | "chamfer"
       });
     });
   });
-  picks.forEach((k, i) => { if (k.d > EDGE_TOL) lost.push(i + 1); });
-  if (lost.length === f.edges.length) throw new Error("no encuentro las aristas elegidas (¿cambió mucho la pieza?)");
-  bodies.forEach((b, bi) => {
-    const mine = new Set(picks.filter((k) => k.body === bi && k.d <= EDGE_TOL).map((k) => k.edge));
-    if (!mine.size) return;
-    const list = b.shape.edges.filter((_, ei) => mine.has(ei));
-    found += list.length;
-    const filter = (finder: R.EdgeFinder) => finder.when(({ element }) => list.some((e) => e.isSame(element)));
-    b.shape = f.type === "fillet" ? b.shape.fillet(f.size, filter) : b.shape.chamfer(f.size, filter);
+  picks.forEach((k, i) => { if (k.d > EDGE_TOL) lost.push(`arista ${i + 1}`); });
+  // medida de cada arista, por cuerpo: índice de arista → medida
+  const perBody = bodies.map(() => new Map<number, number>());
+  // primero las caras (todas sus aristas con la medida general)…
+  faces.forEach((p, fi) => {
+    let best: { bi: number; face: R.Face; d: number } | null = null;
+    bodies.forEach((b, bi) => {
+      const nf = nearestFace(b.shape, p as Vec3);
+      if (nf && (!best || nf.d < best.d)) best = { bi, face: nf.face, d: nf.d };
+    });
+    const bf = best as { bi: number; face: R.Face; d: number } | null;
+    if (!bf || bf.d > EDGE_TOL) { lost.push(`cara ${fi + 1}`); return; }
+    const all = bodies[bf.bi].shape.edges;
+    for (const fe of bf.face.edges) {
+      const ei = all.findIndex((e) => e.isSame(fe));
+      if (ei >= 0) perBody[bf.bi].set(ei, f.size);
+    }
   });
-  if (!found) throw new Error("no encuentro las aristas elegidas");
-  if (lost.length) return `no encontré la arista ${lost.join(", ")}`;
+  // …y luego las aristas sueltas, que pueden llevar su propia medida
+  picks.forEach((k, i) => {
+    if (k.d <= EDGE_TOL) perBody[k.body].set(k.edge, sizes[i] > 0 ? sizes[i] : f.size);
+  });
+  if (perBody.every((m) => !m.size)) throw new Error("no encuentro las aristas elegidas (¿cambió mucho la pieza?)");
+  bodies.forEach((b, bi) => {
+    const mine = perBody[bi];
+    if (!mine.size) return;
+    const list = b.shape.edges.map((e, ei) => ({ e, r: mine.get(ei) })).filter((x) => x.r !== undefined) as { e: R.Edge; r: number }[];
+    const radius = (edge: R.Edge) => list.find((x) => x.e.isSame(edge))?.r ?? null;
+    b.shape = f.type === "fillet" ? b.shape.fillet(radius) : b.shape.chamfer(radius);
+  });
+  if (lost.length) return `no encontré: ${lost.join(", ")}`;
   return null;
 }
 
-
-// ---------------------------------------------------------------
-// Vaciado, agujeros, roscas y patrones
-
-/** Cara de la pieza más cercana a un punto (y su distancia) */
 function nearestFace(shape: Shape, p: Vec3) {
   const v = R.makeVertex(p);
   let best: { face: R.Face; d: number } | null = null;
@@ -408,6 +424,68 @@ function buildScrew(D: number, P: number, L: number): Shape {
   // Sin recorte final: cualquier operación booleana extra con la superficie retorcida
   // cuesta varios segundos. Los extremos ya salen planos.
   return (pen.close().sketchOnPlane("XY") as R.Sketch).extrude(L, { twistAngle: (360 * L) / P }) as Shape;
+}
+
+/** Gira todos los cuerpos para que la cara elegida (o la plana más grande) quede abajo, en Z = 0 */
+function layFlat(bodies: Body[], p: Vec3 | null) {
+  if (!bodies.length) throw new Error("primero crea un sólido");
+  let face: R.Face | null = null;
+  if (p) {
+    let best = Infinity;
+    for (const b of bodies) {
+      const nf = nearestFace(b.shape, p);
+      if (nf && nf.d < best) { best = nf.d; face = nf.face; }
+    }
+    if (!face || best > EDGE_TOL) throw new Error("no encuentro la cara elegida");
+    if (face.geomType !== "PLANE") throw new Error("elige una cara plana");
+  } else {
+    let best = 0;
+    for (const b of bodies) for (const fc of b.shape.faces) {
+      if (fc.geomType !== "PLANE") continue;
+      const a = R.measureArea(fc);
+      if (a > best) { best = a; face = fc; }
+    }
+    if (!face) throw new Error("la pieza no tiene caras planas: elige una a mano");
+  }
+  const nv = face.normalAt();
+  const n: Vec3 = [nv.x, nv.y, nv.z];
+  // girar para que la normal (hacia fuera) apunte hacia abajo (-Z)
+  const c = -n[2];
+  let axis: Vec3 = [n[1], -n[0], 0]; // n × (0,0,-1)
+  let ang = (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI;
+  if (Math.hypot(...axis) < 1e-9) axis = [1, 0, 0];
+  const rot = (sh: Shape) => (ang > 1e-6 ? (sh.rotate(ang, [0, 0, 0], axis) as Shape) : sh);
+  const turned = bodies.map((b) => rot(b.shape));
+  // bajar a Z = 0 y centrar en X e Y
+  let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (const sh of turned) {
+    const [a, b] = sh.boundingBox.bounds;
+    mn = mn.map((v, i) => Math.min(v, a[i])); mx = mx.map((v, i) => Math.max(v, b[i]));
+  }
+  const t: Vec3 = [-(mn[0] + mx[0]) / 2, -(mn[1] + mx[1]) / 2, -mn[2]];
+  bodies.forEach((b, i) => { b.shape = turned[i].translate(...t) as Shape; });
+  ang = 0;
+}
+
+/** Calcula una pieza guardada (sus pasos ya con números) y la junta en un solo sólido */
+const compCache = new Map<string, Shape>();
+function componentShape(features: RF[], name: string): Shape {
+  if (!features?.length) throw new Error("elige una pieza guardada");
+  const key = JSON.stringify(features);
+  const hit = compCache.get(key);
+  if (hit) return hit.clone() as Shape;
+  // la pieza se calcula aparte, sin tocar la memoria de pasos de esta
+  const saved = stepCache;
+  stepCache = [];
+  let res: ReturnType<typeof runFeatures>;
+  try { res = runFeatures(features); } finally { stepCache = saved; }
+  const errs = Object.values(res.errors);
+  if (!res.bodies.length) throw new Error(`la pieza «${name}» no tiene sólidos${errs.length ? ": " + errs[0] : ""}`);
+  let out = res.bodies[0].shape;
+  for (const b of res.bodies.slice(1)) out = out.fuse(b.shape);
+  if (compCache.size > 10) compCache.clear();
+  compCache.set(key, out);
+  return out.clone() as Shape;
 }
 
 /** Texto 3D colocado sobre una cara (o en el suelo si no hay punto) */
@@ -668,6 +746,15 @@ function runFeatures(features: RF[], upTo?: string) {
           let sh = it.shape.clone() as Shape;
           if (f.scale !== 1) sh = sh.scale(f.scale, [0, 0, 0]) as Shape;
           shape = sh.translate(f.x, f.y, f.z) as Shape;
+          break;
+        }
+        case "layflat":
+          layFlat(bodies, f.face as Vec3 | null);
+          break;
+        case "component": {
+          shape = componentShape(f.resolved as RF[], f.source.name);
+          if (f.rz) shape = shape.rotate(f.rz, [0, 0, 0], [0, 0, 1]) as Shape;
+          shape = shape.translate(f.x, f.y, f.z) as Shape;
           break;
         }
         case "text": {
