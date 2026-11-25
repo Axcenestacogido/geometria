@@ -344,6 +344,24 @@ export interface Doc {
   colors?: Record<string, string>;
   /** Solo en el .json descargado: archivos importados (base64), para llevarlos a otro equipo */
   files?: Record<string, { name: string; format: "step" | "stl" | "image"; data: string }>;
+  /** Cotas que añades tú en el plano 2D */
+  dims?: DrawingDim[];
+}
+
+/**
+ * Una cota del plano, en milímetros de la vista (Y hacia abajo, como el SVG).
+ * h/v/a: de a a b (horizontal, vertical o alineada), con la línea separada «off» mm.
+ * d/r: diámetro o radio del círculo de centro c y radio r; la etiqueta va hacia el punto a.
+ */
+export interface DrawingDim {
+  id: string;
+  view: "front" | "top" | "right";
+  kind: "h" | "v" | "a" | "d" | "r";
+  a: [number, number];
+  b: [number, number];
+  off: number;
+  c?: [number, number];
+  r?: number;
 }
 
 // ---------- Mensajes con el trabajador (motor geométrico) ----------

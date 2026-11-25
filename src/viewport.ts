@@ -680,4 +680,57 @@ export class Viewport {
   }
 
   refit() { this.needsFit = true; }
+
+  /**
+   * Miniatura de la pieza (JPEG en base64) para la galería: solo los cuerpos, en vista 3D.
+   * Se dibuja en el mismo lienzo y se vuelve a dibujar la vista normal en el mismo instante,
+   * así que no se ve ningún parpadeo.
+   */
+  thumbnail(w = 240, hgt = 180): string | null {
+    const box = new THREE.Box3().setFromObject(this.bodiesGroup);
+    if (box.isEmpty()) return null;
+    const canvas = this.renderer.domElement;
+    const cw = canvas.width, ch = canvas.height;
+    if (cw < 4 || ch < 4) return null;
+    const cam = new THREE.PerspectiveCamera(30, cw / ch, 0.1, 100000);
+    cam.up.set(0, 0, 1);
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = box.getSize(new THREE.Vector3()).length() / 2 || 10;
+    // que quepa en el recorte 4:3 del centro del lienzo
+    const cropA = w / hgt, canvasA = cw / ch;
+    const vFov = THREE.MathUtils.degToRad(cam.fov / 2);
+    const visibleHalfH = canvasA > cropA ? 1 : canvasA / cropA; // parte de la altura que queda tras recortar
+    const dist = radius / (Math.tan(vFov) * visibleHalfH) * 1.08;
+    cam.position.copy(center).addScaledVector(new THREE.Vector3(1, -1.25, 0.9).normalize(), dist);
+    cam.lookAt(center);
+    cam.updateProjectionMatrix();
+    const hide = [this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup, this.grid, this.axes];
+    const was = hide.map((o) => o.visible);
+    const gz = this.gizmo?.getHelper();
+    const gzWas = gz?.visible;
+    hide.forEach((o) => (o.visible = false));
+    if (gz) gz.visible = false;
+    const light = this.light.position.clone();
+    this.light.position.copy(cam.position).add(new THREE.Vector3(0, 0, dist * 0.6));
+    this.light.target.position.copy(center);
+    let url: string | null = null;
+    try {
+      this.renderer.render(this.scene, cam);
+      const out = document.createElement("canvas");
+      out.width = w; out.height = hgt;
+      const ctx = out.getContext("2d");
+      if (ctx) {
+        let sw = cw, sh = ch;
+        if (canvasA > cropA) sw = ch * cropA; else sh = cw / cropA;
+        ctx.drawImage(canvas, (cw - sw) / 2, (ch - sh) / 2, sw, sh, 0, 0, w, hgt);
+        url = out.toDataURL("image/jpeg", 0.82);
+      }
+    } finally {
+      hide.forEach((o, i) => (o.visible = was[i]));
+      if (gz && gzWas !== undefined) gz.visible = gzWas;
+      this.light.position.copy(light);
+      this.renderer.render(this.scene, this.camera);
+    }
+    return url;
+  }
 }
