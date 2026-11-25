@@ -218,6 +218,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin:
   #app { display: block; height: auto; }
   #printarea { display: block; }
   #printarea svg { width: 297mm; height: 210mm; display: block; }
+  .bom-print { padding: 12mm; color: #000; font-size: 10pt; }
+  .bom-print h1 { font-size: 15pt; margin: 0 0 2mm; }
+  .bom-print p { margin: 0 0 5mm; color: #444; }
+  .bom-print table.bom { width: 100%; }
+  .bom-print .bom th, .bom-print .bom td { border-bottom: 0.2mm solid #999; padding: 1.5mm 2mm; color: #000; background: none; }
 }
 
 /* barra de la vista: herramientas y vistas */
@@ -338,3 +343,20 @@ dialog:has(.gallery) { width: min(820px, 94vw); }
 .joint-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; }
 .joint-range { flex: 1; accent-color: var(--accent); }
 .joint-val { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ---------- BIM: materiales y listado de piezas ---------- */
+.mat-sel { max-width: 118px; font-size: 12px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2); }
+dialog:has(.bom-wrap) { width: min(1100px, 96vw); }
+.bom-wrap { max-height: 46vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+table.bom { border-collapse: collapse; width: 100%; font-size: 13px; }
+.bom th { position: sticky; top: 0; background: var(--panel-2); text-align: left; font-weight: 600; font-size: 12px; color: var(--muted); }
+.bom th, .bom td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.bom td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bom input, .bom select { font: inherit; font-size: 12.5px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); width: 100%; min-width: 70px; }
+.bom .bom-qty { width: 56px; min-width: 56px; }
+.bom .bom-kind { min-width: 104px; }
+.bom .bom-price { width: 72px; min-width: 72px; }
+.bom .mat-sel { max-width: none; }
+.bom tr.bom-sum td { font-weight: 700; border-bottom: 0; }
+.bom tr.bom-sub td { color: var(--muted); }
+.bom-mat { max-width: 520px; }

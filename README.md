@@ -48,6 +48,7 @@ descargarlas como `.json` para pasarlas a otro).
 | **Mi holgura** | Archivo → Mi holgura. Imprime la plantilla «Prueba de holguras», mira qué agujero encaja y guárdalo: se usa en agujeros, catálogo, partir y plantillas. |
 | **Catálogo** | Rodamientos (608, 625, 688, 6001), imanes, insertos de calor M2-M5, tuercas M3-M8, perfil 2020, servo SG90 y NEMA 17. Como pieza o como hueco con holgura. |
 | **Partir** | Corta una pieza que no cabe en la cama en dos, con espigas sueltas o pegadas que se colocan solas donde caben. |
+| **Piezas (BIM)** | Material de cada cuerpo (filamentos, maderas, metales…), peso por su densidad, si se imprime, se fabrica o se compra, cantidad, referencia y notas. Listado con totales por material y coste; descarga CSV para Excel o PDF. Las de catálogo entran solas como compradas. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
