@@ -136,8 +136,29 @@ function tubeClip(): Doc {
   };
 }
 
+/** Ensamblaje: caja con tapa que se abre con una bisagra, para probar uniones y choques */
+function hingedLid(): Doc {
+  const f: Feature[] = [
+    { id: "caja", type: "box", name: "Caja", x: E("-ancho/2"), y: E("-fondo/2"), z: E("0"), w: E("ancho"), d: E("fondo"), h: E("alto"), op: "new" },
+    { id: id("h"), type: "box", name: "Hueco de la caja", x: E("-ancho/2 + pared"), y: E("-fondo/2 + pared"), z: E("pared"), w: E("ancho - 2*pared"), d: E("fondo - 2*pared"), h: E("alto"), op: "cut", target: "caja" },
+    { id: "tapa", type: "box", name: "Tapa", x: E("-ancho/2"), y: E("-fondo/2"), z: E("alto"), w: E("ancho"), d: E("fondo"), h: E("pared"), op: "new" },
+    { id: id("l"), type: "box", name: "Labio de la tapa", x: E("-ancho/2 + pared + holgura"), y: E("-fondo/2 + pared + holgura"), z: E("alto - labio"), w: E("ancho - 2*pared - 2*holgura"), d: E("fondo - 2*pared - 2*holgura"), h: E("labio"), op: "add", target: "tapa" },
+    { id: id("l"), type: "box", name: "Hueco del labio", x: E("-ancho/2 + 2*pared + holgura"), y: E("-fondo/2 + 2*pared + holgura"), z: E("alto - labio - 1"), w: E("ancho - 4*pared - 2*holgura"), d: E("fondo - 4*pared - 2*holgura"), h: E("labio + 1"), op: "cut", target: "tapa" },
+    { id: id("j"), type: "joint", name: "Bisagra de la tapa", kind: "hinge", bodies: ["tapa"], axis: "-x", x: E("0"), y: E("fondo/2"), z: E("alto + pared"), value: E("0"), min: E("0"), max: E("120") },
+  ];
+  return {
+    version: 1, name: "Caja con tapa abatible",
+    variables: [
+      { name: "ancho", value: E("60") }, { name: "fondo", value: E("40") }, { name: "alto", value: E("25") },
+      { name: "pared", value: E("2") }, { name: "holgura", value: E("0.3") }, { name: "labio", value: E("3") },
+    ],
+    features: f,
+  };
+}
+
 export const TEMPLATES: Template[] = [
   { id: "caja", name: "Caja con tapa a presión", info: "La tapa encaja por dentro con un labio. «holgura» decide lo que aprieta: 0,1 aprieta mucho, 0,3 entra suelta.", make: snapBox },
+  { id: "abatible", name: "Caja con tapa abatible (ensamblaje)", info: "Abre la tapa con el deslizador del paso «Bisagra de la tapa» y pulsa «Recorrer y buscar choques». Prueba a subir «labio» a 5: la tapa choca con la pared de delante al abrirse.", make: hingedLid },
   { id: "bisagra", name: "Bisagra imprimible", info: "Se imprime ya montada, de una vez, tumbada como sale. «holgura» es el hueco entre piezas: 0,4 va bien en la Bambu con boquilla de 0,4.", make: hinge },
   { id: "engranajes", name: "Pareja de engranajes", info: "Dos ruedas que engranan, ya colocadas. Cambia «dientes1» y «dientes2» y se recolocan solas. «eje» es el agujero (5,2 para un eje de 5 mm).", make: gears },
   { id: "muelle", name: "Muelle", info: "Muelle de compresión con las puntas planas. Impreso en PETG o TPU aguanta mejor que en PLA; hilo de 1,6 mm o más.", make: spring },

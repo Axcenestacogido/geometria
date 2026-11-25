@@ -333,3 +333,8 @@ dialog:has(.gallery) { width: min(820px, 94vw); }
 .dimbar .btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 .dimhint { margin: 2px 0 8px; font-size: 12.5px; min-height: 1.3em; }
 .sheet.picking svg { cursor: crosshair; touch-action: none; }
+
+/* ---------- Uniones (ensamblajes) ---------- */
+.joint-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 6px; }
+.joint-range { flex: 1; accent-color: var(--accent); }
+.joint-val { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }

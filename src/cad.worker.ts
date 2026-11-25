@@ -11,7 +11,7 @@ import { SCREWS } from "./screws";
 import { gearOutline } from "./gear";
 /** pasos cuyo sólido conviene dibujar con menos detalle */
 const coarseIds = new Set<string>();
-import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView } from "./types";
+import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash } from "./types";
 import interRegular from "./fonts/Inter-Regular.otf?url";
 import interBold from "./fonts/Inter-Bold.otf?url";
 import monoBold from "./fonts/JetBrainsMono-Bold.ttf?url";
@@ -56,6 +56,7 @@ function pump() {
       if (m.kind === "build") doBuild(m);
       else if (m.kind === "export") doExport(m);
       else if (m.kind === "drawing") doDrawing(m);
+      else if (m.kind === "collide") doCollide(m);
     }
   } finally {
     busy = false;
@@ -730,7 +731,8 @@ function runFeatures(features: RF[], upTo?: string) {
       continue;
     }
     try {
-      const label = `Cuerpo ${solidCount + 1}`;
+      // si le has puesto nombre propio al paso («Tapa»), el cuerpo se llama así
+      const label = f.name && !/\s\d+$/.test(f.name.trim()) ? f.name.trim() : `Cuerpo ${solidCount + 1}`;
       const isNew = () => "op" in f && (f.op === "new" || !bodies.length);
       let shape: Shape | null = null;
       switch (f.type) {
@@ -822,6 +824,24 @@ function runFeatures(features: RF[], upTo?: string) {
           if (f.dx || f.dy || f.dz) sh = sh.translate([f.dx, f.dy, f.dz]) as Shape;
           if (f.copy) bodies.push({ id: f.id, name: `${b.name} (copia)`, shape: sh, coarse: b.coarse });
           else bodies[idx] = { ...b, shape: sh };
+          break;
+        }
+        case "joint": {
+          if (!f.bodies.length) throw new Error("elige qué cuerpos se mueven con la unión");
+          if (f.max < f.min) throw new Error("el máximo tiene que ser mayor que el mínimo");
+          if (f.value < f.min - 1e-9 || f.value > f.max + 1e-9) throw new Error(`la posición (${f.value}) se sale de ${f.min} a ${f.max}`);
+          const sign = f.axis.startsWith("-") ? -1 : 1;
+          const ax = f.axis.replace("-", "");
+          const dir: Vec3 = [ax === "x" ? sign : 0, ax === "y" ? sign : 0, ax === "z" ? sign : 0];
+          for (const id of f.bodies) {
+            const i = bodies.findIndex((b) => b.id === id);
+            if (i < 0) throw new Error("uno de los cuerpos de la unión ya no existe");
+            if (!f.value) continue;
+            const sh = f.kind === "hinge"
+              ? bodies[i].shape.clone().rotate(f.value, [f.x, f.y, f.z], dir)
+              : bodies[i].shape.clone().translate([dir[0] * f.value, dir[1] * f.value, dir[2] * f.value]);
+            bodies[i] = { ...bodies[i], shape: sh as Shape };
+          }
           break;
         }
         case "combine": {
@@ -1078,5 +1098,38 @@ function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
     post({ kind: "drawing", seq: m.seq, views });
   } catch (e) {
     post({ kind: "drawing", seq: m.seq, error: msg(e) });
+  }
+}
+
+/** Busca cuerpos que se meten unos en otros (choques de un ensamblaje) */
+function doCollide(m: Extract<WorkerIn, { kind: "collide" }>) {
+  try {
+    const { bodies } = runFeatures(m.features);
+    const clashes: Clash[] = [];
+    const boxes = bodies.map((b) => b.shape.boundingBox.bounds as [Vec3, Vec3]);
+    const overlap = (p: [Vec3, Vec3], q: [Vec3, Vec3]) => [0, 1, 2].every((k) => p[0][k] < q[1][k] - 1e-6 && q[0][k] < p[1][k] - 1e-6);
+    for (let i = 0; i < bodies.length; i++) {
+      for (let j = i + 1; j < bodies.length; j++) {
+        if (!overlap(boxes[i], boxes[j])) continue;
+        let common: Shape;
+        try { common = bodies[i].shape.intersect(bodies[j].shape) as Shape; } catch { continue; }
+        const volume = safeNum(() => R.measureVolume(common));
+        // tocarse (caras en contacto) no es chocar
+        if (!(volume > 0.01)) continue;
+        const c: Clash = { a: bodies[i].id, b: bodies[j].id, nameA: bodies[i].name, nameB: bodies[j].name, volume };
+        if (m.mesh) {
+          try {
+            const mm = common.mesh({ tolerance: 0.1, angularTolerance: 0.5 });
+            const t = new Float32Array(mm.triangles.length * 3);
+            mm.triangles.forEach((vi, k) => { t[k * 3] = mm.vertices[vi * 3]; t[k * 3 + 1] = mm.vertices[vi * 3 + 1]; t[k * 3 + 2] = mm.vertices[vi * 3 + 2]; });
+            c.tris = t;
+          } catch { /* sin dibujo, pero el aviso vale */ }
+        }
+        clashes.push(c);
+      }
+    }
+    post({ kind: "collide", seq: m.seq, clashes }, clashes.flatMap((c) => (c.tris ? [c.tris.buffer] : [])));
+  } catch (e) {
+    post({ kind: "collide", seq: m.seq, clashes: [], error: msg(e) });
   }
 }

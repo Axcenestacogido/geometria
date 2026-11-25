@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -157,6 +157,16 @@ const sketcher = new SketchEditor($("#sketch"), {
 
 const worker = new Worker(new URL("./cad.worker.ts", import.meta.url), { type: "module" });
 const exportWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "exported" }>) => void>();
+const collideWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "collide" }>) => void>();
+let collideSeq = 0;
+/** Pregunta al motor qué cuerpos se meten unos en otros con estos pasos */
+function askCollide(features: Resolved<Feature>[], mesh: boolean) {
+  return new Promise<Extract<WorkerOut, { kind: "collide" }>>((res) => {
+    const s = ++collideSeq;
+    collideWaiters.set(s, res);
+    worker.postMessage({ kind: "collide", seq: s, features, mesh });
+  });
+}
 const drawingWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "drawing" }>) => void>();
 
 worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
@@ -181,6 +191,7 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
     if (section) viewport.setSection(section);
     lastBuildFull = buildFullBySeq === m.seq;
     if (lastBuildFull && m.bodies.length) scheduleThumb();
+    if (clashOn && lastBuildFull && !sweeping) void runClashCheck();
     renderPieceInfo();
     $("#buildtime").textContent = `${m.ms} ms`;
     renderTree();
@@ -194,6 +205,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   } else if (m.kind === "file") {
     if (m.error) toast("No se pudo leer el archivo: " + m.error);
     else if (m.triangles) toast(`Archivo leído (${m.triangles} triángulos)`);
+  } else if (m.kind === "collide") {
+    collideWaiters.get(m.seq)?.(m);
+    collideWaiters.delete(m.seq);
   } else if (m.kind === "drawing") {
     drawingWaiters.get(m.seq)?.(m);
     drawingWaiters.delete(m.seq);
@@ -232,7 +246,7 @@ function rebuild() {
     const f = doc.features.find((x) => x.id === active);
     // al editar un boceto o un redondeo se ve la pieza como estaba antes de ese paso
     // al mover un cuerpo se ve la pieza justo después de ese paso (aún sin los siguientes)
-    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
+    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" || f?.type === "joint" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
     worker.postMessage({ kind: "build", seq: ++seq, features: resolved.features, upTo });
     if (!upTo) buildFullBySeq = seq;
   }, 90);
@@ -319,14 +333,14 @@ function renderUndo() {
 const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
-  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" },
+  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
   { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
   { type: "component" }, { type: "layflat" },
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar",
+  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
@@ -337,6 +351,7 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
   transform: "Mover, girar o escalar un cuerpo (o una copia), con flechas o con números",
   combine: "Sumar, restar o intersecar cuerpos que ya existen",
+  joint: "Ensamblaje: une cuerpos con una bisagra (gira) o una guía (desliza) y comprueba si chocan al moverse",
   gear: "Rueda dentada recta: eliges el módulo y los dientes",
   spring: "Muelle de compresión: diámetro, hilo, paso y vueltas",
 };
@@ -599,6 +614,7 @@ function renderPieceInfo() {
   if (bodies.length > 1) box.append(h("div", { class: "empty" }, `Suma de ${bodies.length} cuerpos.`));
   renderColors(box, bodies);
   renderPrintCheck(box);
+  renderClashCheck(box);
 }
 
 // ---------- colores por cuerpo ----------
@@ -650,6 +666,109 @@ const PRINT_KEY = "geometria:impresion";
 let printOn = false;
 let printSt: PrintSettings = { ...DEFAULT_PRINT };
 try { printSt = { ...DEFAULT_PRINT, ...JSON.parse(localStorage.getItem(PRINT_KEY) || "{}") }; } catch { /* sin almacenamiento */ }
+
+// ---------- choques entre cuerpos (ensamblajes) ----------
+let clashOn = false;
+let clashes: Clash[] | null = null;
+let clashBusy = false, clashAgain = false;
+/** mientras se recorre una unión no se repite la comprobación normal */
+let sweeping = false;
+
+async function runClashCheck() {
+  if (clashBusy) { clashAgain = true; return; }
+  clashBusy = true;
+  try {
+    const r = await askCollide(resolveDoc(doc).features, true);
+    clashes = r.error ? null : r.clashes;
+    if (r.error) toast("No se pudieron comprobar los choques: " + r.error);
+  } finally {
+    clashBusy = false;
+  }
+  if (clashAgain) { clashAgain = false; return runClashCheck(); }
+  viewport.setClash(clashOn ? (clashes ?? []).flatMap((c) => (c.tris ? [c.tris] : [])) : null);
+  if (!$("#props").contains(document.activeElement)) renderPieceInfo();
+}
+
+function renderClashCheck(box: HTMLElement) {
+  const n = build?.bodies.length ?? 0;
+  if (n < 2 && !clashOn) return;
+  box.append(h("h3", { class: "mt" }, "Choques entre cuerpos",
+    h("button", { class: `btn small ${clashOn ? "on" : ""}`, onclick: () => {
+      clashOn = !clashOn;
+      clashes = null;
+      if (clashOn) void runClashCheck(); else viewport.setClash(null);
+      renderPieceInfo();
+    } }, clashOn ? "Ocultar" : "Comprobar")));
+  if (!clashOn) return;
+  if (!clashes) { box.append(h("div", { class: "empty" }, "Mirando…")); return; }
+  if (!clashes.length) { box.append(h("div", { class: "msg info" }, `✓ Ningún cuerpo se mete en otro (${n} cuerpos). Tocarse sí está bien.`)); return; }
+  for (const c of clashes) box.append(h("div", { class: "msg err" }, `⚠ «${c.nameA}» y «${c.nameB}» se meten uno en otro: ${fmtEs(c.volume, c.volume < 10 ? 2 : 0)} mm³ (en rojo).`));
+  box.append(h("div", { class: "empty" }, "Al imprimir piezas que encajan, deja algo de holgura (0,2 a 0,4 mm)."));
+}
+
+/** Mueve la unión de su mínimo a su máximo y apunta dónde choca algo */
+async function sweepJoint(f: JointFeature, out: HTMLElement, btn: HTMLButtonElement) {
+  if (sweeping) return;
+  const base = resolveDoc(doc);
+  const rf = base.features.find((x) => x.id === f.id) as Resolved<JointFeature> | undefined;
+  if (!rf || !(rf.max > rf.min)) { out.className = "msg err"; out.textContent = "Pon un mínimo y un máximo distintos."; return; }
+  sweeping = true;
+  btn.disabled = true;
+  const keep = f.value;
+  const N = 24;
+  const hits: { v: number; c: Clash[] }[] = [];
+  const unit = f.kind === "hinge" ? "°" : " mm";
+  try {
+    for (let i = 0; i <= N; i++) {
+      const v = rf.min + ((rf.max - rf.min) * i) / N;
+      out.className = "empty";
+      out.textContent = `Probando ${fmtEs(v, 1)}${unit}… (${i + 1} de ${N + 1})`;
+      // se ve moverse en la vista 3D mientras se comprueba
+      f.value = fmt(Math.round(v * 1000) / 1000);
+      rebuild();
+      const feats = resolveDoc(doc).features;
+      const r = await askCollide(feats, false);
+      if (r.error) throw new Error(r.error);
+      if (r.clashes.length) hits.push({ v, c: r.clashes });
+    }
+  } catch (e) {
+    out.className = "msg err";
+    out.textContent = "No se pudo recorrer: " + (e as Error).message;
+    btn.disabled = false;
+    return;
+  } finally {
+    f.value = keep;
+    sweeping = false;
+    changed(false);
+  }
+  // afinar dónde empieza y dónde acaba el choque (buscando entre la posición libre y la que choca)
+  const clashAt = async (v: number) => {
+    f.value = fmt(Math.round(v * 1000) / 1000);
+    const r = await askCollide(resolveDoc(doc).features, false);
+    return r.clashes.length > 0;
+  };
+  const step = (rf.max - rf.min) / N;
+  let from = hits[0]?.v, to = hits[hits.length - 1]?.v;
+  if (hits.length) {
+    sweeping = true;
+    out.className = "empty";
+    out.textContent = "Afinando dónde empieza y acaba el choque…";
+    try {
+      if (from > rf.min) { let lo = from - step, hi = from; for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (await clashAt(mid)) hi = mid; else lo = mid; } from = hi; }
+      if (to < rf.max) { let lo = to, hi = to + step; for (let k = 0; k < 6; k++) { const mid = (lo + hi) / 2; if (await clashAt(mid)) lo = mid; else hi = mid; } to = lo; }
+    } finally {
+      f.value = keep;
+      sweeping = false;
+      changed(false);
+    }
+  }
+  if (!hits.length) { btn.disabled = false; out.className = "msg info"; out.textContent = `✓ De ${fmtEs(rf.min, 1)} a ${fmtEs(rf.max, 1)}${unit} no choca nada (probado en ${N + 1} posiciones).`; return; }
+  const pairs = [...new Set(hits.flatMap((x) => x.c.map((c) => `«${c.nameA}» con «${c.nameB}»`)))];
+  out.className = "msg err";
+  btn.disabled = false;
+  const range = Math.abs(to - from) < 0.05 ? `hacia ${fmtEs(from, 1)}${unit}` : `entre ${fmtEs(from, 1)} y ${fmtEs(to, 1)}${unit}`;
+  out.textContent = `⚠ Choca ${range}: ${pairs.join(", ")}. Pon la unión ahí y mira la zona roja con «Comprobar choques» (en la información de la pieza).`;
+}
 
 function renderPrintCheck(box: HTMLElement) {
   box.append(h("h3", { class: "mt" }, "Para imprimir",
@@ -775,6 +894,51 @@ function renderProps() {
       sec.append(exprField("En Z", () => f.rz, (v) => (f.rz = v), k("rz")));
       sec.append(h("h3", { class: "mt" }, "Escalar"));
       sec.append(exprField("Escala", () => f.scale, (v) => (f.scale = v), k("scale"), { hint: "1 = igual · 2 = el doble · 0,5 = la mitad" }));
+      break;
+    }
+    case "joint": {
+      const before = build?.bodiesBefore[f.id] ?? [];
+      const hinge = f.kind === "hinge";
+      sec.append(selectField("Tipo", f.kind, [["hinge", "Bisagra (gira alrededor de un eje)"], ["slide", "Guía (desliza a lo largo de un eje)"]], (v) => {
+        f.kind = v as JointFeature["kind"];
+        if (f.kind === "slide" && f.max === "90") { f.min = "0"; f.max = "20"; }
+        if (f.kind === "hinge" && f.max === "20") { f.min = "0"; f.max = "90"; }
+      }));
+      sec.append(h("h3", { class: "mt" }, "Cuerpos que se mueven"));
+      if (!before.length) sec.append(h("div", { class: "empty" }, "Aún no hay cuerpos antes de este paso."));
+      for (const b of before) sec.append(checkField(b.name, f.bodies.includes(b.id), (v) => { f.bodies = v ? [...f.bodies, b.id] : f.bodies.filter((t) => t !== b.id); }));
+      sec.append(selectField("Eje", f.axis, [["x", "X"], ["-x", "X al revés"], ["y", "Y"], ["-y", "Y al revés"], ["z", "Z"], ["-z", "Z al revés"]], (v) => (f.axis = v as JointFeature["axis"])));
+      // posición con deslizador
+      const rf = resolveDoc(doc).features.find((x) => x.id === f.id) as Resolved<JointFeature> | undefined;
+      const unit = hinge ? "°" : " mm";
+      sec.append(h("h3", { class: "mt" }, hinge ? "Ángulo" : "Recorrido"));
+      if (rf && rf.max > rf.min) {
+        const sl = h("input", { type: "range", class: "joint-range", min: String(rf.min), max: String(rf.max), step: hinge ? "1" : "0.1", value: String(Math.min(rf.max, Math.max(rf.min, rf.value))) }) as HTMLInputElement;
+        const lab = h("span", { class: "joint-val" }, fmtEs(rf.value, 1) + unit);
+        sl.addEventListener("input", () => { f.value = fmt(Math.round(Number(sl.value) * 100) / 100); lab.textContent = fmtEs(Number(sl.value), 1) + unit; changed(false); });
+        sl.addEventListener("change", () => { changed(true); renderProps(); });
+        sec.append(h("div", { class: "joint-row" }, sl, lab));
+      }
+      sec.append(exprField("Posición", () => f.value, (v) => (f.value = v), k("value"), { unit, hint: "o mueve el deslizador" }));
+      sec.append(exprField("Mínimo", () => f.min, (v) => (f.min = v), k("min"), { unit }));
+      sec.append(exprField("Máximo", () => f.max, (v) => (f.max = v), k("max"), { unit }));
+      const out = h("div", { class: "empty" }, "Mueve la unión de punta a punta y te dice si algo choca por el camino.");
+      const btn = h("button", { class: "btn small primary", onclick: () => void sweepJoint(f, out, btn as HTMLButtonElement) }, "▶ Recorrer y buscar choques") as HTMLButtonElement;
+      sec.append(btn, out);
+      if (hinge) {
+        sec.append(h("h3", { class: "mt" }, "Un punto del eje (mm)"));
+        sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+        sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+        sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+        const pick = h("select", {}, h("option", { value: "" }, "elige un cuerpo…"), ...before.map((b) => h("option", { value: b.id }, b.name))) as HTMLSelectElement;
+        pick.addEventListener("change", () => {
+          const c = viewport.bodyCenter(pick.value);
+          if (!c) return toast("Ese cuerpo no está a la vista ahora");
+          [f.x, f.y, f.z] = c.map((v) => fmt(Math.round(v * 100) / 100));
+          changed(true, true);
+        });
+        sec.append(h("div", { class: "field" }, h("label", {}, "Al centro de"), pick), h("div", { class: "empty" }, "Truco: si la bisagra lleva un pasador, pon el eje en el centro del pasador."));
+      }
       break;
     }
     case "combine": {
