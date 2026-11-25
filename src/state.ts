@@ -54,10 +54,15 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   sphere: "Esfera",
   fillet: "Redondeo",
   chamfer: "Chaflán",
+  shell: "Vaciado",
+  pattern: "Patrón",
+  hole: "Agujeros",
+  rod: "Varilla roscada",
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", fillet: "◜", chamfer: "◸",
+  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -95,6 +100,21 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, size: "2", edges: [] };
     case "chamfer":
       return { id, name, type, size: "1", edges: [] };
+    case "shell":
+      return { id, name, type, thickness: "2", faces: [] };
+    case "pattern": {
+      // por defecto, repetir el último paso que crea o quita volumen
+      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod"].includes(f.type));
+      return {
+        id, name, type, kind: "linear", source: src?.id ?? "",
+        axis: "x", count: "3", spacing: "10", axis2: "y", count2: "1", spacing2: "10",
+        cx: "0", cy: "0", cz: "0", angle: "360", offset: "0",
+      };
+    }
+    case "hole":
+      return { id, name, type, kind: "clearance", size: "M3", depth: "10", through: true, fit: "0.2", points: [] };
+    case "rod":
+      return { id, name, type, size: "M8", length: "15", fit: "0.2", points: [] };
   }
 }
 
@@ -108,6 +128,10 @@ const NUM_FIELDS: Record<string, string[]> = {
   sphere: ["x", "y", "z", "r"],
   fillet: ["size"],
   chamfer: ["size"],
+  shell: ["thickness"],
+  pattern: ["count", "spacing", "count2", "spacing2", "cx", "cy", "cz", "angle", "offset"],
+  hole: ["depth", "fit"],
+  rod: ["length", "fit"],
   rect: ["x", "y", "w", "h", "r"],
   circle: ["cx", "cy", "r"],
   ngon: ["cx", "cy", "r", "n"],
@@ -153,6 +177,11 @@ export function resolveDoc(doc: Doc): ResolveOut {
       out.profiles = f.profiles.map((p) => resolveProfile(f.id, p));
     } else {
       for (const k of NUM_FIELDS[f.type]) out[k] = ev((f as never)[k], `${f.id}:${k}`);
+      if (f.type === "hole" || f.type === "rod") {
+        out.points = f.points.map((pt, i) => ({
+          x: ev(pt.x, `${f.id}:${i}:x`), y: ev(pt.y, `${f.id}:${i}:y`), z: ev(pt.z, `${f.id}:${i}:z`), n: pt.n,
+        }));
+      }
     }
     return out as Resolved<Feature>;
   });

@@ -91,6 +91,67 @@ export interface EdgeFeature extends FeatureBase {
   edges: Vec3[];
 }
 
+/** Vaciado: deja paredes de `thickness` y quita las caras elegidas */
+export interface ShellFeature extends FeatureBase {
+  type: "shell";
+  thickness: Expr;
+  /** Un punto sobre cada cara que queda abierta */
+  faces: Vec3[];
+}
+
+export type PatternKind = "linear" | "circular" | "mirror";
+export type Axis = "x" | "y" | "z";
+
+/** Repetir o reflejar un paso (o el cuerpo entero) */
+export interface PatternFeature extends FeatureBase {
+  type: "pattern";
+  kind: PatternKind;
+  /** id del paso a repetir; "" = el último cuerpo entero */
+  source: string;
+  // en fila
+  axis: Axis;
+  count: Expr;
+  spacing: Expr;
+  /** segunda dirección (rejilla). count2 = 1 la desactiva */
+  axis2: Axis;
+  count2: Expr;
+  spacing2: Expr;
+  // en círculo (alrededor de un eje paralelo a `axis` que pasa por cx, cy, cz)
+  cx: Expr; cy: Expr; cz: Expr;
+  angle: Expr;
+  // simetría: plano perpendicular a `axis` que pasa por `offset`
+  offset: Expr;
+}
+
+/** Punto sobre una cara, con su normal hacia fuera */
+export interface FacePoint { x: Expr; y: Expr; z: Expr; n: Vec3 }
+
+export type HoleKind = "clearance" | "countersink" | "counterbore" | "insert" | "pilot" | "nut" | "thread";
+
+/** Agujeros para tornillo, colocados con un clic sobre una cara */
+export interface HoleFeature extends FeatureBase {
+  type: "hole";
+  kind: HoleKind;
+  /** "M3", "M4"… */
+  size: string;
+  depth: Expr;
+  through: boolean;
+  /** holgura extra para la impresora (mm, se suma al diámetro) */
+  fit: Expr;
+  points: FacePoint[];
+  target?: string;
+}
+
+/** Varilla roscada que sale de una cara */
+export interface RodFeature extends FeatureBase {
+  type: "rod";
+  size: string;
+  length: Expr;
+  fit: Expr;
+  points: FacePoint[];
+  target?: string;
+}
+
 export type Feature =
   | SketchFeature
   | ExtrudeFeature
@@ -98,7 +159,11 @@ export type Feature =
   | BoxFeature
   | CylinderFeature
   | SphereFeature
-  | EdgeFeature;
+  | EdgeFeature
+  | ShellFeature
+  | PatternFeature
+  | HoleFeature
+  | RodFeature;
 
 export interface Variable {
   name: string;
@@ -132,6 +197,10 @@ export interface BodyMesh {
   lines: Float32Array;
   /** inicio/cantidad (en floats de `lines`) de cada arista */
   edgeGroups: { start: number; count: number }[];
+  /** inicio/cantidad (en índices de `triangles`) de cada cara */
+  faceGroups: { start: number; count: number }[];
+  volume: number;
+  area: number;
 }
 
 export interface BuildResult {
