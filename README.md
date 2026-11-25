@@ -40,6 +40,9 @@ descargarlas como `.json` para pasarlas a otro).
 | **Combinar** | Suma, resta o interseca cuerpos que ya existen, conservándolos o no. |
 | **Redondear, desfase y quitar tramo** | En el boceto: redondea una esquina (dos tramos que se tocan) o todas las de un contorno, hace una copia paralela hacia dentro o fuera, y quita un tramo para recortar. |
 | **Imagen de referencia** | Cada boceto puede llevar una foto o plano de fondo, con su ancho real en mm y su opacidad, para calcar encima. También se ve en la vista 3D. Va dentro del proyecto `.json`. |
+| **Cotas a tu elección** | En el plano 2D: horizontal, vertical, alineada, diámetro y radio. Se enganchan a esquinas, medios de línea y centros; se guardan con la pieza y salen en naranja si la pieza cambia y ya no coinciden. |
+| **Historial de versiones** | Archivo → Guardar versión (con nombre) y una automática cada 10 minutos de trabajo. Puedes volver a cualquiera o abrirla aparte. |
+| **Mis piezas** | Galería con miniatura de cada pieza, buscador, abrir, duplicar y borrar. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |

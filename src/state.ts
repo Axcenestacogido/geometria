@@ -282,7 +282,17 @@ const KEY_LIST = "geometria:piezas";
 const KEY_DOC = (id: string) => `geometria:pieza:${id}`;
 const KEY_LAST = "geometria:ultima";
 
+const KEY_VERS = (id: string) => `geometria:versiones:${id}`;
+const KEY_MINI = (id: string) => `geometria:mini:${id}`;
+
 export interface SavedMeta { id: string; name: string; updated: number }
+
+/** Una versión guardada de una pieza: con nombre (la guardas tú) o automática */
+export interface Version { t: number; name: string; auto: boolean; doc: string }
+
+/** Cada cuánto se guarda sola una versión mientras trabajas, y cuántas automáticas se guardan */
+export const AUTO_EVERY_MS = 10 * 60 * 1000;
+export const AUTO_KEEP = 30;
 
 function safe<T>(fn: () => T, fallback: T): T {
   try { return fn(); } catch { return fallback; }
@@ -310,11 +320,43 @@ export const storage = {
   remove(id: string) {
     safe(() => {
       localStorage.removeItem(KEY_DOC(id));
+      localStorage.removeItem(KEY_VERS(id));
+      localStorage.removeItem(KEY_MINI(id));
       localStorage.setItem(KEY_LIST, JSON.stringify(storage.list().filter((m) => m.id !== id)));
     }, undefined);
   },
   last(): string | null {
     return safe(() => localStorage.getItem(KEY_LAST), null);
+  },
+  // ---- miniaturas para la galería ----
+  thumb(id: string): string | null {
+    return safe(() => localStorage.getItem(KEY_MINI(id)), null);
+  },
+  setThumb(id: string, dataUrl: string) {
+    safe(() => localStorage.setItem(KEY_MINI(id), dataUrl), undefined);
+  },
+  // ---- historial de versiones ----
+  versions(id: string): Version[] {
+    return safe(() => JSON.parse(localStorage.getItem(KEY_VERS(id)) || "[]") as Version[], []).sort((a, b) => b.t - a.t);
+  },
+  /** Guarda una versión. Las automáticas se quedan en las últimas AUTO_KEEP; si no cabe, se borran las más viejas. */
+  addVersion(id: string, v: Version): boolean {
+    let list = storage.versions(id);
+    if (list[0]?.doc === v.doc && v.auto) return false; // sin cambios desde la última
+    list.unshift(v);
+    let autos = 0;
+    list = list.filter((x) => !x.auto || ++autos <= AUTO_KEEP);
+    for (;;) {
+      try { localStorage.setItem(KEY_VERS(id), JSON.stringify(list)); return true; } catch {
+        // navegador lleno: fuera la automática más vieja (las tuyas con nombre no se tocan)
+        const i = list.map((x) => x.auto).lastIndexOf(true);
+        if (i <= 0) return false;
+        list.splice(i, 1);
+      }
+    }
+  },
+  removeVersion(id: string, t: number) {
+    safe(() => localStorage.setItem(KEY_VERS(id), JSON.stringify(storage.versions(id).filter((v) => v.t !== t))), undefined);
   },
 };
 

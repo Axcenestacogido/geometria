@@ -2,10 +2,11 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
+import { snapsFromPaths, nearestPoint, nearestCircle, dimValue, dimAttached, dimSvg, type Snaps, type ViewXf } from "./drawdims";
 import { files, fileId, toBase64, fromBase64 } from "./files";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
@@ -16,7 +17,7 @@ import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
-  FEATURE_LABEL, FEATURE_ICON, type ResolveOut,
+  FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, type ResolveOut,
 } from "./state";
 
 // ======================================================================
@@ -71,7 +72,9 @@ $("#app").innerHTML = `
   <div class="spacer"></div>
   <div class="menu" id="m-file"><button class="btn">Archivo ▾</button><div class="menu-list">
     <button data-a="new">Pieza nueva</button>
-    <button data-a="open">Abrir pieza guardada…</button>
+    <button data-a="open">Mis piezas…<small>Galería con miniaturas</small></button>
+    <button data-a="version">Guardar versión…<small>Una foto de cómo está ahora, con nombre</small></button>
+    <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
     <button data-a="example">Abrir el ejemplo</button>
     <button data-a="templates">Plantillas…<small>Caja, bisagra, engranajes, muelle, clip, tornillo</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
@@ -176,6 +179,8 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
     }
     viewport.setBodies(m.bodies, doc.colors ?? {});
     if (section) viewport.setSection(section);
+    lastBuildFull = buildFullBySeq === m.seq;
+    if (lastBuildFull && m.bodies.length) scheduleThumb();
     renderPieceInfo();
     $("#buildtime").textContent = `${m.ms} ms`;
     renderTree();
@@ -215,6 +220,8 @@ async function sendFiles() {
 }
 
 let rebuildTimer = 0;
+/** la última construcción enseña la pieza entera (no a medias por estar editando un paso) */
+let lastBuildFull = false, buildFullBySeq = -1;
 function rebuild() {
   clearTimeout(rebuildTimer);
   rebuildTimer = window.setTimeout(() => {
@@ -227,6 +234,7 @@ function rebuild() {
     // al mover un cuerpo se ve la pieza justo después de ese paso (aún sin los siguientes)
     const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
     worker.postMessage({ kind: "build", seq: ++seq, features: resolved.features, upTo });
+    if (!upTo) buildFullBySeq = seq;
   }, 90);
 }
 
@@ -241,7 +249,7 @@ function changed(commit = true, structural = false) {
   if (commit) {
     history.push(JSON.stringify(doc));
     clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => storage.save(docId, doc), 300);
+    saveTimer = window.setTimeout(() => { storage.save(docId, doc); autoVersion(); }, 300);
     renderUndo();
   }
   const af = doc.features.find((f) => f.id === active);
@@ -252,6 +260,25 @@ function changed(commit = true, structural = false) {
     // al soltar un punto, que el panel muestre los números nuevos (si no estás escribiendo en él)
     if (commit && !$("#props").contains(document.activeElement)) renderProps();
   }
+}
+
+/** Cada 10 minutos de trabajo se guarda sola una versión (si hubo cambios) */
+function autoVersion() {
+  const last = storage.versions(docId).find((v) => v.auto)?.t ?? 0;
+  if (Date.now() - last < AUTO_EVERY_MS) return;
+  storage.addVersion(docId, { t: Date.now(), name: "Automática", auto: true, doc: JSON.stringify(doc) });
+}
+
+/** Miniatura para la galería: cuando la pieza entera está a la vista y lleva un rato quieta */
+let thumbTimer = 0;
+function scheduleThumb() {
+  clearTimeout(thumbTimer);
+  const id = docId;
+  thumbTimer = window.setTimeout(() => {
+    if (id !== docId || !lastBuildFull) return;
+    const url = viewport.thumbnail();
+    if (url) storage.setThumb(id, url);
+  }, 1500);
 }
 
 function setDoc(d: Doc, id = docId, resetHistory = true) {
@@ -1590,8 +1617,10 @@ function doExport(format: "stl" | "step" | "3mf") {
 const VIEW_LABEL: Record<DrawingView["name"], string> = { front: "Frente", top: "Arriba", right: "Derecha", iso: "3D" };
 const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/** Hoja A4 apaisada (en mm) con las vistas, las medidas generales y el cajetín */
-function drawingSheet(views: DrawingView[]): string {
+/** Hoja A4 apaisada (en mm) con las vistas, las medidas generales, tus cotas y el cajetín */
+function drawingSheet(views: DrawingView[], snaps: Partial<Record<DrawingView["name"], Snaps>> = {}): { svg: string; xf: Partial<Record<DrawingView["name"], ViewXf & { cell: [number, number, number, number] }>>; dimAt: { id: string; at: [number, number] }[] } {
+  const xf: Partial<Record<DrawingView["name"], ViewXf & { cell: [number, number, number, number] }>> = {};
+  const dimAt: { id: string; at: [number, number] }[] = [];
   const W = 297, H = 210, M = 10;
   const cellW = (W - 2 * M - 10) / 2, cellH = (H - 2 * M - 34) / 2;
   const by = Object.fromEntries(views.map((v) => [v.name, v])) as Partial<Record<DrawingView["name"], DrawingView>>;
@@ -1629,6 +1658,7 @@ function drawingSheet(views: DrawingView[]): string {
     const k = name === "iso" ? Math.min((cellW - 12) / Math.max(w, 1e-3), (cellH - 14) / Math.max(hh, 1e-3)) : sc;
     const ox = cx + (cellW - w * k) / 2 - v.box[0] * k, oy = cy + 6 + (cellH - 6 - hh * k) / 2 - v.box[1] * k;
     const tr = `translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${k})`;
+    xf[name] = { ox, oy, k, cell: [cx, cy, cx + cellW, cy + cellH] };
     out.push(`<g transform="${tr}" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">`);
     for (const d of v.hidden) out.push(`<path d="${d}" stroke-width="${0.18 / k}" stroke-dasharray="${1.2 / k} ${0.8 / k}" stroke="#555"/>`);
     for (const d of v.visible) out.push(`<path d="${d}" stroke-width="${0.35 / k}"/>`);
@@ -1639,6 +1669,15 @@ function drawingSheet(views: DrawingView[]): string {
     const gy = y1 + 6, gx = x1 + 6;
     out.push(ext(x0, y1 + 1, x0, gy + 1), ext(x1, y1 + 1, x1, gy + 1), dim(x0, gy, x1, gy, n(w), false));
     if (name !== "right") out.push(ext(x1 + 1, y0, gx + 1, y0), ext(x1 + 1, y1, gx + 1, y1), dim(gx, y0, gx, y1, n(hh), true));
+    // tus cotas: en naranja las que se han quedado sueltas porque la pieza cambió
+    for (const dd of doc.dims ?? []) {
+      if (dd.view !== name) continue;
+      const loose = snaps[name] ? !dimAttached(dd, snaps[name]!) : false;
+      const pre = dd.kind === "d" ? "Ø" : dd.kind === "r" ? "R" : "";
+      const r = dimSvg(dd, { ox, oy, k }, pre + n(dimValue(dd)), loose ? "#d9480f" : "#000");
+      out.push(r.svg);
+      dimAt.push({ id: dd.id, at: r.at });
+    }
   }
   // cajetín
   const ty = H - M / 2 - 24, tx = W - M / 2 - 110;
@@ -1650,9 +1689,20 @@ function drawingSheet(views: DrawingView[]): string {
     `<text x="${tx + 3}" y="${ty + 16}">Escala ${scaleTxt}</text><text x="${tx + 3}" y="${ty + 21}">Medidas en mm</text>`,
     `<text x="${tx + 58}" y="${ty + 16}">${today}</text><text x="${tx + 58}" y="${ty + 21}">Hecho con Geometría</text></g>`);
   out.push(`<text x="${M}" y="${H - M / 2 - 2}" font-size="2.6" fill="#555">Líneas discontinuas: aristas ocultas. Las vistas 2D están a la misma escala; la 3D, no.</text>`);
+  out.push(`<g id="dim-ui"></g>`);
   out.push("</svg>");
-  return out.join("");
+  return { svg: out.join(""), xf, dimAt };
 }
+
+type DimTool = "none" | "h" | "v" | "a" | "d" | "r" | "del";
+const DIM_TOOLS: [DimTool, string, string][] = [
+  ["h", "↔ Horizontal", "Toca dos puntos y luego dónde va la línea de cota"],
+  ["v", "↕ Vertical", "Toca dos puntos y luego dónde va la línea de cota"],
+  ["a", "⤢ Alineada", "Toca dos puntos (mide en línea recta) y luego dónde va la cota"],
+  ["d", "Ø Diámetro", "Toca el borde de un círculo, por el lado donde quieres el texto"],
+  ["r", "R Radio", "Toca el borde de un arco o círculo, por el lado donde quieres el texto"],
+  ["del", "✕ Quitar cota", "Toca el número de la cota que quieres quitar"],
+];
 
 function drawingDialog() {
   if (!engineReady) return toast("El motor aún está cargando");
@@ -1661,22 +1711,132 @@ function drawingDialog() {
   dlg.innerHTML = "";
   const preview = h("div", { class: "sheet" }, h("div", { class: "empty" }, "Dibujando las vistas…"));
   const actions = h("div", { class: "actions" });
-  dlg.append(h("h2", {}, "Plano con medidas"), preview, actions);
+  const dimbar = h("div", { class: "dimbar" });
+  const hint = h("div", { class: "empty dimhint" });
+  dlg.append(h("h2", {}, "Plano con medidas"), dimbar, hint, preview, actions);
   if (!dlg.open) dlg.showModal();
   const s = ++seq;
   drawingWaiters.set(s, (m) => {
     rebuild();
     if (!m.views?.length) { preview.innerHTML = ""; preview.append(h("div", { class: "msg err" }, "No se pudo dibujar: " + (m.error ?? "sin vistas"))); return; }
-    const svg = drawingSheet(m.views);
-    preview.innerHTML = svg;
+    const views = m.views;
+    const snaps: Partial<Record<DrawingView["name"], Snaps>> = {};
+    for (const v of views) if (v.name !== "iso") snaps[v.name] = snapsFromPaths([...v.visible, ...v.hidden]);
+    let sheet = drawingSheet(views, snaps);
+    let tool: DimTool = "none";
+    /** puntos ya tocados de la cota que estás poniendo */
+    let picks: { view: DrawingDim["view"]; pts: [number, number][] } | null = null;
+    const draw = () => {
+      sheet = drawingSheet(views, snaps);
+      preview.innerHTML = sheet.svg;
+      const loose = (doc.dims ?? []).filter((d) => snaps[d.view] && !dimAttached(d, snaps[d.view]!)).length;
+      hint.textContent = tool === "none"
+        ? (loose ? `${loose} cota${loose > 1 ? "s" : ""} en naranja: la pieza cambió y ya no coinciden. Quítalas o vuelve a ponerlas.` : "Elige un tipo de cota para añadir las tuyas. Se guardan con la pieza.")
+        : DIM_TOOLS.find((t) => t[0] === tool)![2] + ". Esc para cancelar.";
+    };
+    const setTool = (t: DimTool) => {
+      tool = tool === t ? "none" : t;
+      picks = null;
+      dimbar.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.t === tool));
+      preview.classList.toggle("picking", tool !== "none");
+      draw();
+    };
+    for (const [t, label] of DIM_TOOLS) dimbar.append(h("button", { class: "btn small", "data-t": t, onclick: () => setTool(t) }, label));
+    // del punto de la pantalla a mm de la hoja y de la vista
+    const where = (e: PointerEvent) => {
+      const svg = preview.querySelector("svg") as SVGSVGElement | null;
+      const ctm = svg?.getScreenCTM();
+      if (!svg || !ctm) return null;
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+      const sheetP: [number, number] = [pt.x, pt.y];
+      const mmPerPx = 1 / ctm.a;
+      for (const name of ["front", "top", "right"] as const) {
+        const x = sheet.xf[name];
+        if (!x) continue;
+        const [x0, y0, x1, y1] = x.cell;
+        if (picks && picks.view !== name) continue; // la segunda punta, en la misma vista
+        if (!picks && (pt.x < x0 || pt.x > x1 || pt.y < y0 || pt.y > y1)) continue;
+        return { view: name, x, sheetP, p: [(pt.x - x.ox) / x.k, (pt.y - x.oy) / x.k] as [number, number], tol: (e.pointerType === "touch" ? 9 : 5) * mmPerPx / x.k };
+      }
+      return { view: null, x: null, sheetP, p: null, tol: 0 };
+    };
+    /** la cota que saldría si tocaras ahora */
+    const candidate = (w: NonNullable<ReturnType<typeof where>>): { dim?: DrawingDim; mark?: [number, number] } => {
+      if (!w.view || !w.p || !w.x) return {};
+      const sn = snaps[w.view];
+      if (!sn) return {};
+      if (tool === "d" || tool === "r") {
+        const c = nearestCircle(sn, w.p, w.tol);
+        if (!c || (tool === "d" && !c.full)) return {};
+        return { dim: { id: "", view: w.view, kind: tool, a: w.p, b: w.p, off: 0, c: c.c, r: c.r } };
+      }
+      if (!picks || picks.pts.length < 2) return { mark: nearestPoint(sn, w.p, w.tol) ?? undefined };
+      const [a, b] = picks.pts;
+      let off: number;
+      if (tool === "h") off = w.p[1];
+      else if (tool === "v") off = w.p[0];
+      else { const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; off = ((w.p[0] - a[0]) * -(b[1] - a[1]) + (w.p[1] - a[1]) * (b[0] - a[0])) / l; }
+      return { dim: { id: "", view: w.view, kind: tool as "h" | "v" | "a", a, b, off } };
+    };
+    const ui = () => preview.querySelector("#dim-ui");
+    preview.addEventListener("pointermove", (e) => {
+      const g = ui();
+      if (!g || tool === "none" || tool === "del") return;
+      const w = where(e);
+      const parts: string[] = [];
+      if (w?.x && picks) for (const p of picks.pts) parts.push(`<circle cx="${w.x.ox + p[0] * w.x.k}" cy="${w.x.oy + p[1] * w.x.k}" r="1" fill="#1c7ed6"/>`);
+      if (w?.x) {
+        const c = candidate(w);
+        if (c.mark) parts.push(`<circle cx="${w.x.ox + c.mark[0] * w.x.k}" cy="${w.x.oy + c.mark[1] * w.x.k}" r="1.3" fill="none" stroke="#1c7ed6" stroke-width="0.4"/>`);
+        if (c.dim) {
+          const pre = c.dim.kind === "d" ? "Ø" : c.dim.kind === "r" ? "R" : "";
+          parts.push(dimSvg(c.dim, w.x, pre + fmtEs(dimValue(c.dim), 2).replace(/,00$/, ""), "#1c7ed6").svg);
+        }
+      }
+      g.innerHTML = parts.join("");
+    });
+    preview.addEventListener("click", (e) => {
+      if (tool === "none") return;
+      const w = where(e as PointerEvent);
+      if (!w) return;
+      if (tool === "del") {
+        let best = "", bd = 6 / ((preview.querySelector("svg") as SVGSVGElement).getScreenCTM()?.a || 1) + 3;
+        for (const d of sheet.dimAt) { const dd = Math.hypot(d.at[0] - w.sheetP[0], d.at[1] - w.sheetP[1]); if (dd < bd) { bd = dd; best = d.id; } }
+        if (!best) return toast("Toca justo el número de la cota");
+        doc.dims = (doc.dims ?? []).filter((d) => d.id !== best);
+        changed(true);
+        return draw();
+      }
+      const c = candidate(w);
+      if (c.dim) {
+        (doc.dims ??= []).push({ ...c.dim, id: uid() });
+        picks = null;
+        changed(true);
+        return draw();
+      }
+      if (tool === "d" || tool === "r") return toast(tool === "d" ? "Toca el borde de un círculo entero" : "Toca el borde de un arco");
+      if (!c.mark || !w.view) return toast("Toca cerca de una esquina, el medio de una línea o un centro");
+      if (!picks) picks = { view: w.view, pts: [c.mark] };
+      else if (Math.hypot(picks.pts[0][0] - c.mark[0], picks.pts[0][1] - c.mark[1]) < 1e-6) return;
+      else picks.pts.push(c.mark);
+    });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || tool === "none") return;
+      e.preventDefault(); // que no cierre la ventana
+      if (picks) { picks = null; const g = ui(); if (g) g.innerHTML = ""; } else setTool(tool);
+    };
+    dlg.addEventListener("keydown", onKey);
+    dlg.addEventListener("close", () => dlg.removeEventListener("keydown", onKey), { once: true });
+    draw();
     actions.append(
       h("button", { class: "btn primary", onclick: () => {
-        $("#printarea").innerHTML = svg;
+        $("#printarea").innerHTML = drawingSheet(views, snaps).svg;
         dlg.close();
         // el navegador ofrece «Guardar como PDF» en el diálogo de imprimir
         setTimeout(() => window.print(), 50);
       } }, "Imprimir o guardar PDF"),
-      h("button", { class: "btn", onclick: () => download(svg, `${safeName()}-plano.svg`, "image/svg+xml") }, "Descargar SVG"),
+      h("button", { class: "btn", onclick: () => download(drawingSheet(views, snaps).svg, `${safeName()}-plano.svg`, "image/svg+xml") }, "Descargar SVG"),
+      h("button", { class: "btn", onclick: () => { if (!doc.dims?.length) return toast("Aún no has puesto ninguna cota"); if (confirm("¿Quitar todas tus cotas de este plano?")) { doc.dims = []; changed(true); draw(); } } }, "Quitar mis cotas"),
       h("span", { class: "spacer" }),
       h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar"),
     );
@@ -1686,17 +1846,113 @@ function drawingDialog() {
 $("#drawing").addEventListener("click", drawingDialog);
 window.addEventListener("afterprint", () => { $("#printarea").innerHTML = ""; });
 
+/** Galería de piezas guardadas en este navegador, con miniatura */
 function openDialog() {
   const dlg = $("#dlg") as HTMLDialogElement;
   dlg.innerHTML = "";
+  // la abierta, con su miniatura al día
+  if (!storage.list().some((m) => m.id === docId)) storage.save(docId, doc);
+  if (lastBuildFull) { const u = viewport.thumbnail(); if (u) storage.setThumb(docId, u); }
   const list = storage.list();
-  dlg.append(h("h2", {}, "Piezas guardadas en este navegador"));
+  const search = h("input", { class: "gal-search", type: "search", placeholder: "Buscar por nombre…" }) as HTMLInputElement;
+  const grid = h("div", { class: "gallery" });
+  const fill = () => {
+    grid.innerHTML = "";
+    const q = search.value.trim().toLowerCase();
+    const shown = list.filter((m) => !q || m.name.toLowerCase().includes(q));
+    if (!shown.length) grid.append(h("div", { class: "empty" }, list.length ? "Ninguna se llama así." : "Todavía no hay ninguna."));
+    for (const m of shown) {
+      const url = storage.thumb(m.id);
+      const open = () => { const d = storage.load(m.id); if (d) setDoc(d, m.id); dlg.close(); };
+      const pic = url ? h("img", { src: url, alt: "" }) : h("div", { class: "nopic" }, "Sin miniatura");
+      const nv = storage.versions(m.id).length;
+      grid.append(h("div", { class: "card" + (m.id === docId ? " current" : "") },
+        h("button", { class: "pic", title: "Abrir", onclick: open }, pic),
+        h("div", { class: "card-name" }, m.name),
+        h("small", {}, new Date(m.updated).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" }), nv ? ` · ${nv} versión${nv > 1 ? "es" : ""}` : ""),
+        h("div", { class: "card-acts" },
+          m.id === docId ? h("small", {}, "Abierta") : h("button", { class: "btn small primary", onclick: open }, "Abrir"),
+          h("button", { class: "btn small", onclick: () => {
+            const d = storage.load(m.id); if (!d) return;
+            d.name += " (copia)";
+            const nid = uid();
+            storage.save(nid, d);
+            if (url) storage.setThumb(nid, url);
+            if (m.id !== docId) storage.save(docId, doc); // que la abierta siga siendo la última
+            openDialog();
+            toast("Copia creada");
+          } }, "Duplicar"),
+          m.id === docId ? null : h("button", { class: "btn small", onclick: () => { if (confirm(`¿Borrar «${m.name}» y sus versiones?`)) { storage.remove(m.id); openDialog(); } } }, "Borrar"),
+        ),
+      ));
+    }
+  };
+  search.addEventListener("input", fill);
+  fill();
+  dlg.append(h("h2", {}, "Mis piezas"), h("p", { class: "empty" }, "Guardadas en este navegador. Para pasarlas a otro equipo: Archivo → Descargar proyecto."), search, grid,
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  if (!dlg.open) dlg.showModal();
+}
+
+/** Guarda a mano una versión con nombre */
+function saveVersionDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const inp = h("input", { value: `Versión ${new Date().toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" })}` }) as HTMLInputElement;
+  const ok = () => {
+    const name = inp.value.trim() || "Versión";
+    if (storage.addVersion(docId, { t: Date.now(), name, auto: false, doc: JSON.stringify(doc) })) toast(`Versión «${name}» guardada`);
+    else toast("No cabe en el navegador: borra versiones viejas o descarga el proyecto");
+    dlg.close();
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") ok(); });
+  dlg.append(h("h2", {}, "Guardar versión"),
+    h("p", { class: "empty" }, "Ponle un nombre que te diga algo, como «antes de agujerear» o «la que imprimí». Además se guarda una sola cada 10 minutos de trabajo."),
+    h("div", { class: "field" }, h("label", {}, "Nombre"), inp),
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar"), " ", h("button", { class: "btn primary", onclick: ok }, "Guardar")));
+  dlg.showModal();
+  inp.select();
+}
+
+/** Lista de versiones de la pieza abierta, para volver a una o abrirla como copia */
+function historyDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const list = storage.versions(docId);
+  dlg.append(h("h2", {}, "Historial de versiones"),
+    h("p", { class: "empty" }, "Al volver a una versión, la de ahora se guarda antes, así que no pierdes nada. También puedes deshacer (Ctrl+Z)."));
   const box = h("div", { class: "list" });
-  if (!list.length) box.append(h("div", { class: "empty" }, "Todavía no hay ninguna."));
-  for (const m of list) {
+  if (!list.length) box.append(h("div", { class: "empty" }, "Aún no hay versiones. Usa Archivo → Guardar versión, o sigue trabajando: cada 10 minutos se guarda una sola."));
+  const cur = JSON.stringify(doc);
+  for (const v of list) {
+    let steps = 0, name = "";
+    try { const d = JSON.parse(v.doc) as Doc; steps = d.features.length; name = d.name; } catch { /* rota */ }
+    const same = v.doc === cur;
     box.append(h("div", { class: "it" },
-      h("span", { onclick: () => { const d = storage.load(m.id); if (d) setDoc(d, m.id); dlg.close(); } }, m.name, " ", h("small", {}, new Date(m.updated).toLocaleString("es-ES"))),
-      m.id === docId ? h("small", {}, "(abierta)") : h("button", { class: "btn small", onclick: () => { if (confirm(`¿Borrar «${m.name}»?`)) { storage.remove(m.id); openDialog(); } } }, "Borrar"),
+      h("span", {}, v.auto ? h("i", { class: "vtag" }, "auto") : null, " ", v.name,
+        h("small", { class: "block" }, `${new Date(v.t).toLocaleString("es-ES")} · ${steps} paso${steps === 1 ? "" : "s"}${name && name !== doc.name ? ` · «${name}»` : ""}${same ? " · igual que ahora" : ""}`)),
+      same ? null : h("button", { class: "btn small primary", onclick: () => {
+        storage.addVersion(docId, { t: Date.now(), name: `Antes de volver a «${v.name}»`, auto: true, doc: cur });
+        const d = JSON.parse(v.doc) as Doc;
+        doc = d;
+        resolved = resolveDoc(doc);
+        active = null;
+        sketcher.close();
+        history.push(JSON.stringify(doc));
+        storage.save(docId, doc);
+        renderAll();
+        rebuild();
+        dlg.close();
+        toast(`Has vuelto a «${v.name}»`);
+      } }, "Volver a esta"),
+      h("button", { class: "btn small", onclick: () => {
+        const d = JSON.parse(v.doc) as Doc;
+        d.name = `${d.name} (${v.name})`;
+        dlg.close();
+        setDoc(d, uid());
+        toast("Abierta como pieza aparte");
+      } }, "Abrir aparte"),
+      h("button", { class: "btn small", title: "Borrar esta versión", onclick: () => { storage.removeVersion(docId, v.t); historyDialog(); } }, "✕"),
     ));
   }
   dlg.append(box, h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
@@ -1720,6 +1976,8 @@ function fileAction(a: string) {
   else if (a === "example") setDoc(exampleDoc(), uid());
   else if (a === "dup") { const d: Doc = JSON.parse(JSON.stringify(doc)); d.name += " (copia)"; setDoc(d, uid()); toast("Copia creada"); }
   else if (a === "open") openDialog();
+  else if (a === "version") saveVersionDialog();
+  else if (a === "history") historyDialog();
   else if (a === "templates") templatesDialog();
   else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();

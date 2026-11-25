@@ -108,7 +108,7 @@ button, input, select { font: inherit; color: inherit; }
 .field .val.bad { color: var(--danger); }
 .grow { flex: 1; }
 .mt { margin-top: 12px; }
-.actions { margin-top: 12px; display: flex; gap: 6px; }
+.actions { margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
 .subsection { padding: 10px 0 0; }
 .row-pt { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; }
 .t-right { text-align: right; }
@@ -300,7 +300,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin:
   .sketchbar .btn.primary { order: -1; }
   .sketchhint { top: calc(8px + env(safe-area-inset-top)); bottom: auto; left: 8px; right: 8px; font-size: 11px; max-height: 3.2em; overflow: hidden; background: color-mix(in srgb, var(--paper) 85%, transparent); border-radius: 10px; padding: 4px 8px; }
   dialog { padding: 14px; }
-  .sheet { width: 92vw; }
+  .sheet { width: 100%; }
 }
 @media (pointer: coarse) {
   .btn.small { padding: 6px 10px; font-size: 13px; }
@@ -309,3 +309,27 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin:
   .field input, .field select { padding: 8px; font-size: 16px; }
 }
 .sk-amount { width: 64px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); text-align: center; }
+
+/* ---------- Galería de piezas e historial ---------- */
+.gal-search { width: 100%; margin: 4px 0 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.gal-search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; max-height: 60vh; overflow: auto; padding: 2px; }
+dialog:has(.gallery) { width: min(820px, 94vw); }
+.gallery .card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 4px; background: var(--panel-2); min-width: 0; }
+.gallery .card.current { border-color: var(--accent); }
+.gallery .pic { display: block; padding: 0; border: 0; border-radius: 7px; overflow: hidden; aspect-ratio: 4 / 3; background: var(--view-bg); cursor: pointer; }
+.gallery .pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gallery .nopic { width: 100%; height: 100%; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.gallery .card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gallery small { color: var(--muted); }
+.gallery .card-acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+.vtag { font-style: normal; font-size: 11px; padding: 1px 6px; border-radius: 99px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+@media (max-width: 700px) {
+  .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+}
+
+/* ---------- Cotas en el plano ---------- */
+.dimbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.dimbar .btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.dimhint { margin: 2px 0 8px; font-size: 12.5px; min-height: 1.3em; }
+.sheet.picking svg { cursor: crosshair; touch-action: none; }
