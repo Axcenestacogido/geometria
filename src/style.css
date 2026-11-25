@@ -79,8 +79,8 @@ button, input, select { font: inherit; color: inherit; }
 .side.right { border-right: 0; border-left: 1px solid var(--line); }
 .section { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .section h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
-.tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
-.tool { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); cursor: pointer; font-size: 11px; }
+.tools { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.tool { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); cursor: pointer; font-size: 10.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool b { font-size: 17px; line-height: 1; font-weight: 400; }
 .tool:hover { border-color: var(--accent); }
 .tool:disabled { opacity: .4; cursor: default; border-color: var(--line); }
@@ -99,8 +99,8 @@ button, input, select { font: inherit; color: inherit; }
 
 .field { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 6px; margin-bottom: 6px; }
 .field label { color: var(--muted); font-size: 13px; }
-.field input, .field select { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); }
-.field input:focus, .field select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.field input, .field select, .field textarea { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); font: inherit; resize: vertical; }
+.field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .field input.bad { border-color: var(--danger); }
 .field .val { font-size: 11px; color: var(--muted); grid-column: 2; margin-top: -4px; }
 .field .val.bad { color: var(--danger); }
@@ -148,6 +148,7 @@ button, input, select { font: inherit; color: inherit; }
 .sketch-svg .prof { fill: color-mix(in srgb, var(--body) 35%, transparent); stroke: var(--sketch); stroke-width: 1.6; cursor: pointer; }
 .sketch-svg .prof.hole { fill: var(--paper); stroke-dasharray: 5 3; }
 .sketch-svg .prof.sel { stroke: var(--accent); stroke-width: 2.2; }
+.sketch-svg .prof.open { fill: none; stroke-width: 2.4; }
 .sketch-svg .seg { fill: none; stroke: transparent; stroke-width: 10; cursor: pointer; }
 .sketch-svg .seg.segsel { stroke: color-mix(in srgb, var(--accent) 45%, transparent); }
 .sketch-svg .handle { fill: var(--panel); stroke: var(--accent); stroke-width: 1.6; cursor: move; }
@@ -185,3 +186,9 @@ kbd { font: 11px ui-monospace, monospace; background: var(--panel-2); border: 1p
 
 .info-row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .info-row b { font-variant-numeric: tabular-nums; }
+.sketchbar .sep { width: 6px; }
+.sketch-svg .cons { cursor: pointer; }
+.sketch-svg .cons rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.sketch-svg .cons text { fill: var(--accent); font-size: 11px; font-weight: 700; }
+.sketch-svg .cons:hover rect { fill: var(--danger); stroke: var(--danger); }
+.sketch-svg .cons:hover text { fill: #fff; }

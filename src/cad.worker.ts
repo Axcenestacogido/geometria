@@ -8,7 +8,10 @@ import * as R from "replicad";
 import { planeBasis, scale as vscale, type Basis } from "./geom";
 import { buildModel3mf } from "./threemf";
 import { SCREWS } from "./screws";
-import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult } from "./types";
+import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont } from "./types";
+import interRegular from "./fonts/Inter-Regular.otf?url";
+import interBold from "./fonts/Inter-Bold.otf?url";
+import monoBold from "./fonts/JetBrainsMono-Bold.ttf?url";
 
 type RF = Resolved<Feature>;
 type RSketch = Extract<RF, { type: "sketch" }>;
@@ -31,6 +34,7 @@ opencascade({ locateFile: () => wasmUrl })
 
 self.onmessage = (ev: MessageEvent<WorkerIn>) => {
   const m = ev.data;
+  if (m.kind === "file") { loadFile(m); return; }
   if (m.kind === "build") {
     // solo importa la última petición de reconstrucción
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === "build") queue.splice(i, 1);
@@ -47,11 +51,101 @@ function pump() {
     while (queue.length) {
       const m = queue.shift()!;
       if (m.kind === "build") doBuild(m);
-      else doExport(m);
+      else if (m.kind === "export") doExport(m);
     }
   } finally {
     busy = false;
   }
+}
+
+// ---------------------------------------------------------------
+// Cosas que llegan tarde (tipografías, archivos importados): cuando están listas
+// se olvida lo calculado y se repite la última reconstrucción.
+
+let lastBuild: Extract<WorkerIn, { kind: "build" }> | null = null;
+function rerunLast() {
+  stepCache = [];
+  if (lastBuild && !queue.some((q) => q.kind === "build")) queue.push(lastBuild);
+  pump();
+}
+
+const FONT_URL: Record<TextFont, string> = { sans: interRegular, "sans-bold": interBold, mono: monoBold };
+const fontState = new Map<TextFont, "loading" | "ok" | string>();
+/** true si la tipografía ya está cargada; si no, la pide y avisa al terminar */
+function fontReady(font: TextFont): boolean {
+  const st = fontState.get(font);
+  if (st === "ok") return true;
+  if (st && st !== "loading") throw new Error("no se pudo cargar la tipografía: " + st);
+  if (!st) {
+    fontState.set(font, "loading");
+    fetch(FONT_URL[font])
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+      .then((buf) => R.loadFont(buf, font))
+      .then(() => fontState.set(font, "ok"))
+      .catch((e) => fontState.set(font, String(e?.message ?? e)))
+      .finally(rerunLast);
+  }
+  return false;
+}
+
+/** Piezas importadas, ya convertidas a sólido, por id de archivo */
+const imported = new Map<string, { shape?: Shape; error?: string }>();
+const MAX_STL_TRIANGLES = 60000;
+
+async function loadFile(m: Extract<WorkerIn, { kind: "file" }>) {
+  if (imported.has(m.id)) return;
+  imported.set(m.id, {});
+  const until = () => new Promise<void>((res) => { const t = () => (ready ? res() : setTimeout(t, 100)); t(); });
+  await until();
+  try {
+    let shape: Shape;
+    let triangles: number | undefined;
+    if (m.format === "step") {
+      shape = (await R.importSTEP(new Blob([m.data]))) as Shape;
+    } else {
+      const tris = parseSTL(m.data);
+      triangles = tris.length / 9;
+      if (triangles > MAX_STL_TRIANGLES) throw new Error(`tiene ${triangles} triángulos; el máximo es ${MAX_STL_TRIANGLES}. Simplifícalo antes (por ejemplo en Bambu Studio o Blender)`);
+      const faces: R.Face[] = [];
+      for (let i = 0; i < tris.length; i += 9) {
+        const a: Vec3 = [tris[i], tris[i + 1], tris[i + 2]], b: Vec3 = [tris[i + 3], tris[i + 4], tris[i + 5]], c: Vec3 = [tris[i + 6], tris[i + 7], tris[i + 8]];
+        // triángulos degenerados (sin área) se saltan
+        const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        const cr = Math.hypot(ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]);
+        if (cr < 1e-10) continue;
+        try { faces.push(R.makePolygon([a, b, c])); } catch { /* triángulo raro: fuera */ }
+      }
+      if (!faces.length) throw new Error("el STL no tiene triángulos");
+      shape = R.makeSolid(faces) as unknown as Shape;
+    }
+    imported.set(m.id, { shape });
+    post({ kind: "file", id: m.id, triangles });
+  } catch (e) {
+    const error = msg(e);
+    imported.set(m.id, { error });
+    post({ kind: "file", id: m.id, error });
+  }
+  rerunLast();
+}
+
+/** Lee un STL (binario o de texto) y devuelve los vértices de cada triángulo seguidos */
+function parseSTL(buf: ArrayBuffer): Float32Array {
+  const dv = new DataView(buf);
+  if (buf.byteLength >= 84) {
+    const n = dv.getUint32(80, true);
+    if (84 + n * 50 === buf.byteLength) {
+      const out = new Float32Array(n * 9);
+      for (let i = 0; i < n; i++) for (let k = 0; k < 9; k++) out[i * 9 + k] = dv.getFloat32(84 + i * 50 + 12 + k * 4, true);
+      return out;
+    }
+  }
+  const txt = new TextDecoder().decode(buf);
+  const nums: number[] = [];
+  const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/g;
+  let mm: RegExpExecArray | null;
+  while ((mm = re.exec(txt))) nums.push(Number(mm[1]), Number(mm[2]), Number(mm[3]));
+  if (nums.some((x) => !Number.isFinite(x))) throw new Error("el STL tiene números que no se entienden");
+  return new Float32Array(nums.slice(0, nums.length - (nums.length % 9)));
 }
 
 // ---------------------------------------------------------------
@@ -86,6 +180,7 @@ function profileDrawing(p: RSketch["profiles"][number]): R.Drawing {
     }
     case "poly": {
       const pts = p.pts;
+      if (p.open) throw new Error("una línea abierta no encierra nada: úsala como camino de un barrido");
       if (pts.length < 3) throw new Error("un perfil cerrado necesita 3 puntos o más");
       let pen = R.draw([pts[0].x, pts[0].y]);
       for (let i = 0; i < pts.length; i++) {
@@ -102,9 +197,25 @@ function profileDrawing(p: RSketch["profiles"][number]): R.Drawing {
   }
 }
 
+/** El camino de un barrido: la primera línea abierta del boceto, o si no hay, su primer contorno */
+function pathDrawing(s: RSketch): R.Drawing {
+  const p = s.profiles.find((x) => x.kind === "poly" && x.open) ?? s.profiles[0];
+  if (!p) throw new Error("el boceto del camino está vacío");
+  if (p.kind !== "poly" || !p.open) return profileDrawing(p);
+  if (p.pts.length < 2) throw new Error("el camino necesita 2 puntos o más");
+  let pen = R.draw([p.pts[0].x, p.pts[0].y]);
+  for (let i = 0; i < p.pts.length - 1; i++) {
+    const a = p.pts[i], b = p.pts[i + 1];
+    if (Math.abs(a.s || 0) > 1e-6) pen = pen.sagittaArcTo([b.x, b.y], a.s!);
+    else pen = pen.lineTo([b.x, b.y]);
+  }
+  return pen.done();
+}
+
 function sketchDrawing(s: RSketch): R.Drawing {
-  const solids = s.profiles.filter((p) => !p.hole);
-  const holes = s.profiles.filter((p) => p.hole);
+  const closed = s.profiles.filter((p) => !(p.kind === "poly" && p.open));
+  const solids = closed.filter((p) => !p.hole);
+  const holes = closed.filter((p) => p.hole);
   if (!solids.length) throw new Error("el boceto no tiene ningún perfil (que no sea agujero)");
   let d: R.Drawing | null = null;
   for (const p of solids) {
@@ -299,6 +410,28 @@ function buildScrew(D: number, P: number, L: number): Shape {
   return (pen.close().sketchOnPlane("XY") as R.Sketch).extrude(L, { twistAngle: (360 * L) / P }) as Shape;
 }
 
+/** Texto 3D colocado sobre una cara (o en el suelo si no hay punto) */
+function textSolid(f: Extract<RF, { type: "text" }>): Shape {
+  let d = R.drawText(f.text, { fontSize: f.size, fontFamily: f.font });
+  // centrar el texto en el punto elegido
+  const [[x0, y0], [x1, y1]] = d.boundingBox.bounds;
+  d = d.translate(-(x0 + x1) / 2, -(y0 + y1) / 2);
+  if (f.angle) d = d.rotate(f.angle, [0, 0]);
+  const p = f.points[f.points.length - 1];
+  const at: Vec3 = p ? [p.x, p.y, p.z] : [0, 0, 0];
+  const n: Vec3 = p ? (p.n as Vec3) : [0, 0, 1];
+  // dirección de lectura: horizontal en las paredes, X en el suelo o el techo
+  let xd: Vec3 = Math.abs(n[2]) > 0.9 ? [1, 0, 0] : [-n[1], n[0], 0];
+  const L = Math.hypot(...xd);
+  xd = [xd[0] / L, xd[1] / L, xd[2] / L];
+  // relieve: empieza un poco dentro para que se una; grabado: entra `depth` y sobresale un poco
+  const start = f.op === "cut" ? -f.depth : f.op === "add" ? -0.2 : 0;
+  const len = f.op === "cut" ? f.depth + 0.3 : f.op === "add" ? f.depth + 0.2 : f.depth;
+  const origin: Vec3 = [at[0] + n[0] * start, at[1] + n[1] * start, at[2] + n[2] * start];
+  const sk = d.sketchOnPlane(new R.Plane(origin, xd, n) as never);
+  return (sk as R.Sketch).extrude(len) as Shape;
+}
+
 function holeTool(f: Extract<RF, { type: "hole" }>, depth: number): Shape {
   const sc = SCREWS[f.size];
   if (!sc) throw new Error(`no conozco la medida ${f.size}`);
@@ -451,7 +584,9 @@ function runFeatures(features: RF[], upTo?: string) {
     if (f.type === "sketch") {
       sketches.set(f.id, f);
       // validar el boceto ya, para avisar pronto
-      try { if (!f.off) sketchDrawing(f); } catch (e) { errors[f.id] = msg(e); }
+      // (un boceto que solo tiene líneas abiertas es un camino: no se valida como contorno)
+      const onlyPaths = f.profiles.length > 0 && f.profiles.every((p) => p.kind === "poly" && p.open);
+      try { if (!f.off && !onlyPaths) sketchDrawing(f); } catch (e) { errors[f.id] = msg(e); }
       if (i === features.length - 1) stepCache.push(snapshot(keys[i], { bodies, errors, bodiesBefore, sketches, tools, solidCount }));
       continue;
     }
@@ -498,6 +633,48 @@ function runFeatures(features: RF[], upTo?: string) {
           const ang = Math.max(-360, Math.min(360, f.angle));
           if (!ang) throw new Error("el ángulo no puede ser 0");
           shape = (sketch() as R.Sketch).revolve(ax, { origin: basis.origin, angle: ang }) as Shape;
+          break;
+        }
+        case "sweep": {
+          const prof = sketches.get(f.sketch), path = sketches.get(f.path);
+          if (!prof) throw new Error("elige el boceto con la forma");
+          if (!path) throw new Error("elige el boceto con el camino");
+          if (prof.id === path.id) throw new Error("la forma y el camino tienen que ser bocetos distintos");
+          if (prof.off || path.off) throw new Error("uno de los bocetos está apagado");
+          const shapeDrawing = sketchDrawing(prof);
+          const pathSketch = pathDrawing(path).sketchOnPlane(makePlane(sketchBasis(path))) as R.Sketch;
+          shape = pathSketch.sweepSketch((plane, origin) => shapeDrawing.sketchOnPlane(plane as never, origin) as R.Sketch, { transitionMode: "round" }) as Shape; // con esquinas redondeadas: con "frenet" algunos caminos con arcos dan sólidos que luego no se pueden sumar
+          break;
+        }
+        case "loft": {
+          const list = f.sketches.map((id) => sketches.get(id));
+          if (list.length < 2 || list.some((x) => !x)) throw new Error("elige al menos dos bocetos, en orden");
+          if (list.some((x) => x!.off)) throw new Error("uno de los bocetos está apagado");
+          const sk = list.map((x) => {
+            const d = sketchDrawing(x!).sketchOnPlane(makePlane(sketchBasis(x!)));
+            if (!(d instanceof R.Sketch)) throw new Error(`«${x!.name}» tiene que ser un solo contorno sin agujeros`);
+            return d;
+          });
+          shape = sk[0].loftWith(sk.slice(1), { ruled: f.ruled }) as Shape;
+          break;
+        }
+        case "import": {
+          if (!f.file) throw new Error("elige un archivo STEP o STL");
+          const it = imported.get(f.file);
+          if (!it) throw new Error("falta el archivo: vuelve a importarlo");
+          if (it.error) throw new Error("no se pudo leer el archivo: " + it.error);
+          if (!it.shape) throw new Error("leyendo el archivo…");
+          if (!(f.scale > 0)) throw new Error("la escala debe ser mayor que 0");
+          let sh = it.shape.clone() as Shape;
+          if (f.scale !== 1) sh = sh.scale(f.scale, [0, 0, 0]) as Shape;
+          shape = sh.translate(f.x, f.y, f.z) as Shape;
+          break;
+        }
+        case "text": {
+          if (!f.text.trim()) throw new Error("escribe algún texto");
+          if (f.size <= 0 || f.depth <= 0) throw new Error("el alto y la profundidad deben ser mayores que 0");
+          if (!fontReady(f.font)) throw new Error("cargando la tipografía…");
+          shape = textSolid(f);
           break;
         }
         case "box":
@@ -619,6 +796,7 @@ function safeNum(fn: () => number) {
 }
 
 function doBuild(m: Extract<WorkerIn, { kind: "build" }>) {
+  lastBuild = m;
   const t0 = performance.now();
   const { bodies, errors, bodiesBefore } = runFeatures(m.features, m.upTo);
   const tSteps = performance.now() - t0;
@@ -639,7 +817,8 @@ async function doExport(m: Extract<WorkerIn, { kind: "export" }>) {
     let data: ArrayBuffer;
     if (m.format === "3mf") {
       const objs = bodies.map((b) => {
-        const mm = b.shape.mesh({ tolerance: 0.01, angularTolerance: 0.1 });
+        // con roscas, la malla fina sería enorme: basta con 0,02 mm
+        const mm = b.shape.mesh(b.coarse ? { tolerance: 0.02, angularTolerance: 0.2 } : { tolerance: 0.01, angularTolerance: 0.1 });
         return { name: b.name, vertices: mm.vertices, triangles: mm.triangles };
       });
       data = buildModel3mf(objs);

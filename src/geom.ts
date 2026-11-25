@@ -98,7 +98,7 @@ export const uid = () => Math.random().toString(36).slice(2, 9);
 type RProfile =
   | { kind: "rect"; x: number; y: number; w: number; h: number }
   | { kind: "circle" | "ngon"; cx: number; cy: number; r: number; n?: number }
-  | { kind: "poly"; pts: { x: number; y: number; s?: number }[] };
+  | { kind: "poly"; pts: { x: number; y: number; s?: number }[]; open?: boolean };
 
 /** Contorno 2D (en mm) de un perfil ya calculado */
 export function profileLoop(p: RProfile): [number, number][] {
@@ -117,6 +117,8 @@ export function profileLoop(p: RProfile): [number, number][] {
   }
   const out: [number, number][] = [];
   p.pts.forEach((a, i) => {
+    // en una línea abierta no hay tramo de vuelta al primer punto
+    if (p.open && i === p.pts.length - 1) return;
     const b = p.pts[(i + 1) % p.pts.length];
     const seg = arcPoints([a.x, a.y], [b.x, b.y], a.s || 0);
     out.push(...(i === 0 ? seg : seg.slice(1)));

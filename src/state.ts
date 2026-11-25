@@ -58,11 +58,15 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   pattern: "Patrón",
   hole: "Agujeros",
   rod: "Varilla roscada",
+  text: "Texto",
+  sweep: "Barrido",
+  loft: "Transición",
+  import: "Importado",
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", fillet: "◜", chamfer: "◸",
-  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶",
+  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -104,7 +108,7 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, thickness: "2", faces: [] };
     case "pattern": {
       // por defecto, repetir el último paso que crea o quita volumen
-      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod"].includes(f.type));
+      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "text", "sweep", "loft", "import"].includes(f.type));
       return {
         id, name, type, kind: "linear", source: src?.id ?? "",
         axis: "x", count: "3", spacing: "10", axis2: "y", count2: "1", spacing2: "10",
@@ -115,6 +119,16 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, kind: "clearance", size: "M3", depth: "10", through: true, fit: "0.2", points: [] };
     case "rod":
       return { id, name, type, size: "M8", length: "15", fit: "0.2", points: [] };
+    case "text":
+      return { id, name, type, text: "Hola", font: "sans-bold", size: "8", depth: hasBody ? "0.6" : "2", angle: "0", points: [], op: hasBody ? "cut" : "new" };
+    case "sweep": {
+      const sk = doc.features.filter((f) => f.type === "sketch");
+      return { id, name, type, sketch: sk[sk.length - 2]?.id ?? "", path: sk[sk.length - 1]?.id ?? "", op };
+    }
+    case "loft":
+      return { id, name, type, sketches: doc.features.filter((f) => f.type === "sketch").slice(-2).map((f) => f.id), ruled: false, op };
+    case "import":
+      return { id, name, type, file: "", fileName: "", format: "step", x: "0", y: "0", z: "0", scale: "1", op };
   }
 }
 
@@ -132,6 +146,10 @@ const NUM_FIELDS: Record<string, string[]> = {
   pattern: ["count", "spacing", "count2", "spacing2", "cx", "cy", "cz", "angle", "offset"],
   hole: ["depth", "fit"],
   rod: ["length", "fit"],
+  text: ["size", "depth", "angle"],
+  sweep: [],
+  loft: [],
+  import: ["x", "y", "z", "scale"],
   rect: ["x", "y", "w", "h", "r"],
   circle: ["cx", "cy", "r"],
   ngon: ["cx", "cy", "r", "n"],
@@ -177,7 +195,7 @@ export function resolveDoc(doc: Doc): ResolveOut {
       out.profiles = f.profiles.map((p) => resolveProfile(f.id, p));
     } else {
       for (const k of NUM_FIELDS[f.type]) out[k] = ev((f as never)[k], `${f.id}:${k}`);
-      if (f.type === "hole" || f.type === "rod") {
+      if (f.type === "hole" || f.type === "rod" || f.type === "text") {
         out.points = f.points.map((pt, i) => ({
           x: ev(pt.x, `${f.id}:${i}:x`), y: ev(pt.y, `${f.id}:${i}:y`), z: ev(pt.z, `${f.id}:${i}:z`), n: pt.n,
         }));
@@ -264,5 +282,5 @@ export const storage = {
 
 export function isDoc(x: unknown): x is Doc {
   const d = x as Doc;
-  return !!d && d.version === 1 && Array.isArray(d.features) && Array.isArray(d.variables);
+  return !!d && d.version === 1 && Array.isArray(d.features) && Array.isArray(d.variables) && (d.files === undefined || typeof d.files === "object");
 }

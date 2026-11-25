@@ -1,11 +1,12 @@
 // Editor de bocetos en 2D. Se dibuja sobre una hoja milimetrada (SVG).
 // Las medidas se guardan como texto, así que pueden llevar variables.
 
-import type { Profile, SketchFeature } from "./types";
+import type { Profile, SegRef, SketchConstraint, SketchFeature } from "./types";
+import { CONSTRAINT_GLYPH, CONSTRAINT_NAME, segOf, solveSketch, cleanConstraints } from "./constraints";
 import { arcPoints, uid } from "./geom";
 import { fmt } from "./expr";
 
-export type SketchTool = "select" | "poly" | "rect" | "circle" | "ngon";
+export type SketchTool = "select" | "poly" | "path" | "rect" | "circle" | "ngon";
 
 type P2 = [number, number];
 
@@ -19,6 +20,7 @@ interface Callbacks {
 export const TOOL_HINT: Record<SketchTool, string> = {
   select: "Clic para elegir un perfil o un tramo. Arrastra los puntos para moverlos. Doble clic en una cota para escribir la medida.",
   poly: "Clic para cada esquina. Clic en el primer punto (o Intro) para cerrar. Esc para cancelar.",
+  path: "Línea abierta (camino para un barrido): clic para cada punto e Intro para terminar.",
   rect: "Clic en una esquina y clic en la opuesta.",
   circle: "Clic en el centro y clic para el radio.",
   ngon: "Clic en el centro y clic para el tamaño (polígono regular, 6 lados por defecto).",
@@ -30,6 +32,8 @@ export class SketchEditor {
   tool: SketchTool = "select";
   selected: string | null = null;
   selSeg: number | null = null;
+  /** tramos elegidos para poner restricciones (Mayús+clic añade otro) */
+  picks: SegRef[] = [];
   private center: P2 = [0, 0];
   private zoom = 4; // px por mm
   private draft: P2[] = [];
@@ -85,6 +89,7 @@ export class SketchEditor {
     if (fresh) {
       this.selected = null;
       this.selSeg = null;
+      this.picks = [];
       this.draft = [];
       this.refIn = []; this.refOut = []; this.refPts = [];
       this.pendingFit = true;
@@ -198,6 +203,7 @@ export class SketchEditor {
         const segs: P2[][] = [];
         const dims: Dim[] = [];
         pts.forEach((a, i) => {
+          if (p.open && i === pts.length - 1) return; // línea abierta: sin tramo de vuelta
           const b = pts[(i + 1) % pts.length];
           const s = ev(p.pts[i].s || "0");
           const seg = arcPoints(a, b, s);
@@ -255,25 +261,44 @@ export class SketchEditor {
       const g = this.geo(p);
       if (!g) continue;
       const sel = p.id === this.selected;
-      out.push(`<path d="${path(g.loop)}Z" class="prof ${p.hole ? "hole" : ""} ${sel ? "sel" : ""}" data-pid="${p.id}"/>`);
+      const open = p.kind === "poly" && p.open;
+      out.push(`<path d="${path(g.loop)}${open ? "" : "Z"}" class="prof ${open ? "open" : ""} ${p.hole ? "hole" : ""} ${sel ? "sel" : ""}" data-pid="${p.id}"/>`);
       if (g.segs) g.segs.forEach((s, i) => {
-        out.push(`<path d="${path(s)}" class="seg ${sel && this.selSeg === i ? "segsel" : ""}" data-pid="${p.id}" data-seg="${i}"/>`);
+        const picked = this.picks.some((r) => r.p === p.id && r.i === i);
+        out.push(`<path d="${path(s)}" class="seg ${picked ? "segsel" : ""}" data-pid="${p.id}" data-seg="${i}"/>`);
       });
-      if (sel || this.feature.profiles.length < 12) for (const d of g.dims) out.push(this.dimSvg(d, p.id, sel));
+      // cotas: siempre en el elegido; en los demás solo si el dibujo es sencillo (un SVG importado tendría cientos)
+      if (sel || (this.feature.profiles.length < 12 && g.dims.length <= 16)) for (const d of g.dims) out.push(this.dimSvg(d, p.id, sel));
       if (sel) for (const h of g.handles) {
         const [x, y] = this.toScreen(h.p);
         out.push(`<rect x="${x - 5}" y="${y - 5}" width="10" height="10" class="handle" data-pid="${p.id}" data-h="${h.key}"/>`);
       }
     }
+    // restricciones: un símbolo junto a cada tramo (clic para quitarla)
+    for (const c of this.feature.constraints ?? []) {
+      for (const r of "t" in c ? [c.s, c.t] : [c.s]) {
+        const sg = segOf(this.feature, r);
+        if (!sg) continue;
+        const [pp, ia, ib] = sg;
+        let a: P2, b: P2;
+        try { a = [this.cb.ev(pp.pts[ia].x), this.cb.ev(pp.pts[ia].y)]; b = [this.cb.ev(pp.pts[ib].x), this.cb.ev(pp.pts[ib].y)]; } catch { continue; }
+        const [ax, ay] = this.toScreen(a), [bx, by] = this.toScreen(b);
+        const L = Math.hypot(bx - ax, by - ay) || 1;
+        // al otro lado de la cota, y un poco desplazado si hay varias en el mismo tramo
+        const nth = (this.feature.constraints ?? []).filter((o) => ("t" in o ? [o.s, o.t] : [o.s]).some((q) => q.p === r.p && q.i === r.i)).indexOf(c);
+        const gx = (ax + bx) / 2 + ((by - ay) / L) * 14 + nth * 16, gy = (ay + by) / 2 - ((bx - ax) / L) * 14;
+        out.push(`<g class="cons" data-cons="${c.id}"><title>${CONSTRAINT_NAME[c.kind]} (clic para quitarla)</title><rect x="${gx - 8}" y="${gy - 8}" width="16" height="16" rx="4" data-cons="${c.id}"/><text x="${gx}" y="${gy + 4}" text-anchor="middle" data-cons="${c.id}">${CONSTRAINT_GLYPH[c.kind]}</text></g>`);
+      }
+    }
     // borrador
     if (this.draft.length && this.cursor) {
       const c = this.cursor;
-      if (this.tool === "poly") {
+      if (this.tool === "poly" || this.tool === "path") {
         out.push(`<path d="${path([...this.draft, c])}" class="draft"/>`);
         const a = this.draft[this.draft.length - 1];
         out.push(this.dimSvg({ a, b: c, value: Math.hypot(c[0] - a[0], c[1] - a[1]), field: "", side: 1 }, "", false));
         const [fx, fy] = this.toScreen(this.draft[0]);
-        out.push(`<circle cx="${fx}" cy="${fy}" r="7" class="close-hint"/>`);
+        if (this.tool === "poly") out.push(`<circle cx="${fx}" cy="${fy}" r="7" class="close-hint"/>`);
       } else if (this.tool === "rect") {
         const a = this.draft[0];
         out.push(`<path d="${path([a, [c[0], a[1]], c, [a[0], c[1]], a])}" class="draft"/>`);
@@ -333,6 +358,14 @@ export class SketchEditor {
     if (e.button !== 0) return;
     const m = this.snap(this.toModel(e), e);
     if (this.tool === "select") {
+      const consId = t.getAttribute("data-cons");
+      if (consId) {
+        this.feature.constraints = (this.feature.constraints ?? []).filter((c) => c.id !== consId);
+        if (!this.feature.constraints.length) delete this.feature.constraints;
+        this.cb.onChange(true);
+        this.render();
+        return;
+      }
       const pid = t.getAttribute("data-pid");
       const h = t.getAttribute("data-h");
       const seg = t.getAttribute("data-seg");
@@ -343,6 +376,12 @@ export class SketchEditor {
       if (pid && !t.hasAttribute("data-dim")) {
         this.selected = pid;
         this.selSeg = seg !== null ? Number(seg) : null;
+        if (seg !== null) {
+          const r = { p: pid, i: Number(seg) };
+          const has = this.picks.findIndex((q) => q.p === r.p && q.i === r.i);
+          if (e.shiftKey) { if (has >= 0) this.picks.splice(has, 1); else this.picks = [...this.picks.slice(-1), r]; }
+          else this.picks = [r];
+        } else if (!e.shiftKey) this.picks = [];
         const prof = this.feature.profiles.find((p) => p.id === pid)!;
         this.drag = { kind: "move", pid, start: m, orig: JSON.stringify(prof), moved: false };
         this.cb.onSelect(pid, this.selSeg);
@@ -352,6 +391,7 @@ export class SketchEditor {
       if (!pid) {
         this.selected = null;
         this.selSeg = null;
+        this.picks = [];
         this.cb.onSelect(null, null);
         this.render();
       }
@@ -359,8 +399,8 @@ export class SketchEditor {
     }
     // herramientas de dibujo
     const f = this.feature;
-    if (this.tool === "poly") {
-      if (this.draft.length >= 3 && samePt(m, this.draft[0])) return this.finishPoly();
+    if (this.tool === "poly" || this.tool === "path") {
+      if (this.tool === "poly" && this.draft.length >= 3 && samePt(m, this.draft[0])) return this.finishPoly();
       if (this.draft.length && samePt(m, this.draft[this.draft.length - 1])) return;
       this.draft.push(m);
     } else if (!this.draft.length) {
@@ -388,6 +428,7 @@ export class SketchEditor {
 
   /** Si un perfil nuevo queda dentro de otro, lo marcamos como agujero */
   private autoHole(p: Profile) {
+    if (p.kind === "poly" && p.open) return;
     const g = this.geo(p);
     if (!g || !this.feature) return;
     for (const o of this.feature.profiles) {
@@ -398,9 +439,10 @@ export class SketchEditor {
   }
 
   finishPoly() {
-    if (!this.feature || this.draft.length < 3) return;
+    const open = this.tool === "path";
+    if (!this.feature || this.draft.length < (open ? 2 : 3)) return;
     const id = uid();
-    const prof: Profile = { id, kind: "poly", hole: false, pts: this.draft.map((p) => ({ x: fmt(p[0]), y: fmt(p[1]) })) };
+    const prof: Profile = { id, kind: "poly", hole: false, pts: this.draft.map((p) => ({ x: fmt(p[0]), y: fmt(p[1]) })), ...(open ? { open: true } : {}) };
     this.feature.profiles.push(prof);
     this.autoHole(prof);
     this.draft = [];
@@ -416,9 +458,32 @@ export class SketchEditor {
     return false;
   }
 
+  /** Añade una restricción a los tramos elegidos y mueve los puntos para cumplirla */
+  addConstraint(kind: SketchConstraint["kind"]): string | null {
+    if (!this.feature) return null;
+    const [s, t] = this.picks;
+    if (!s || ((kind === "h" || kind === "v") ? this.picks.length !== 1 : !t)) return "elige los tramos primero";
+    const id = uid();
+    const c: SketchConstraint = kind === "h" || kind === "v" ? { id, kind, s } : { id, kind, s, t };
+    (this.feature.constraints ??= []).push(c);
+    // el primer punto del primer tramo se queda quieto, para que la figura no se desplace
+    const ok = solveSketch(this.feature, this.cb.ev, new Set([`${s.p}:${s.i}`]));
+    if (!ok) {
+      this.feature.constraints = this.feature.constraints.filter((x) => x.id !== id);
+      solveSketch(this.feature, this.cb.ev);
+      this.render();
+      return "no se puede: choca con otra restricción o con una medida escrita con variables";
+    }
+    this.cb.onChange(true);
+    this.render();
+    return null;
+  }
+
   deleteSelected() {
     if (!this.feature || !this.selected) return false;
     this.feature.profiles = this.feature.profiles.filter((p) => p.id !== this.selected);
+    cleanConstraints(this.feature);
+    this.picks = [];
     this.selected = null;
     this.cb.onSelect(null, null);
     this.cb.onChange(true);
@@ -437,7 +502,12 @@ export class SketchEditor {
     this.cursor = m;
     if (this.drag?.kind === "point") {
       const p = this.feature.profiles.find((q) => q.id === (this.drag as { pid: string }).pid);
-      if (p) { this.movePoint(p, this.drag.key, m); this.drag.moved = true; this.cb.onChange(false); }
+      if (p) {
+        this.movePoint(p, this.drag.key, m);
+        if (p.kind === "poly") solveSketch(this.feature, this.cb.ev, new Set([`${p.id}:${this.drag.key.slice(1)}`]));
+        this.drag.moved = true;
+        this.cb.onChange(false);
+      }
     } else if (this.drag?.kind === "move") {
       const d = this.drag;
       const dx = m[0] - d.start[0], dy = m[1] - d.start[1];
@@ -445,6 +515,8 @@ export class SketchEditor {
       const orig = JSON.parse(d.orig) as Profile;
       const idx = this.feature.profiles.findIndex((q) => q.id === d.pid);
       this.feature.profiles[idx] = this.translated(orig, dx, dy);
+      const moved = this.feature.profiles[idx];
+      if (moved.kind === "poly") solveSketch(this.feature, this.cb.ev, new Set(moved.pts.map((_, i) => `${moved.id}:${i}`)));
       d.moved = true;
       this.cb.onChange(false);
     }
@@ -531,6 +603,7 @@ export class SketchEditor {
       } else if (p.kind === "poly") {
         const i = Number(field.slice(3));
         this.setSegLength(p, i, num);
+        solveSketch(this.feature!, this.cb.ev, new Set([`${p.id}:${i}`, `${p.id}:${(i + 1) % p.pts.length}`]));
       }
       this.cb.onChange(true);
       this.render();
