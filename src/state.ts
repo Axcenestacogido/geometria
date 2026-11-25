@@ -1,6 +1,6 @@
 import type { Doc, Feature, Expr, Resolved, Profile, PlaneDef } from "./types";
 import { evaluate, resolveVariables } from "./expr";
-import { uid } from "./geom";
+import { planeBasis, uid } from "./geom";
 
 // ---------- Documento nuevo ----------
 
@@ -70,13 +70,14 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   loft: "Transición",
   import: "Importado",
   relief: "Relieve de imagen",
+  plane: "Plano de referencia",
   layflat: "Apoyar para imprimir",
   component: "Pieza",
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", joint: "⚭", catalog: "⚙︎", split: "✂", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
-  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", relief: "▦", layflat: "⤓", component: "❖",
+  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", relief: "▦", plane: "▱", layflat: "⤓", component: "❖",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -153,6 +154,8 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, sketches: doc.features.filter((f) => f.type === "sketch").slice(-2).map((f) => f.id), ruled: false, op };
     case "import":
       return { id, name, type, file: "", fileName: "", format: "step", x: "0", y: "0", z: "0", scale: "1", op };
+    case "plane":
+      return { id, name, type, plane: plane ?? { kind: "std", name: "XY", offset: "10" }, size: "80" };
     case "relief":
       return { id, name, type, file: "", fileName: "", aspect: 1, mode: "logo", width: "60", height: hasBody ? "1" : "3", base: "0.8", threshold: "50", detail: "200", invert: false, x: "0", y: "0", z: "0", op: hasBody ? "add" : "new" };
     case "layflat":
@@ -175,6 +178,7 @@ const NUM_FIELDS: Record<string, string[]> = {
   joint: ["x", "y", "z", "value", "min", "max"],
   catalog: ["x", "y", "z", "rx", "rz", "length", "fit"],
   split: ["at", "pinD", "pinL", "count", "fit", "gap"],
+  plane: ["size"],
   relief: ["width", "height", "base", "threshold", "detail", "x", "y", "z"],
   gear: ["x", "y", "z", "module", "teeth", "thickness", "bore", "fit", "angle"],
   spring: ["x", "y", "z", "diameter", "wire", "pitch", "turns"],
@@ -228,10 +232,28 @@ export function resolveDoc(doc: Doc, depth = 0): ResolveOut {
     }
     return out;
   };
+  // planos de referencia ya calculados, para los bocetos que van encima
+  const refPlanes = new Map<string, ReturnType<typeof planeBasis>>();
+  const resolvePlane = (f: { id: string; plane: PlaneDef }) => {
+    const pl = f.plane;
+    const nums = { offset: ev(pl.offset, `${f.id}:offset`), tilt: ev(pl.tilt, `${f.id}:tilt`), turn: ev(pl.turn, `${f.id}:turn`) };
+    if (pl.kind !== "ref") return { ...pl, ...nums };
+    const b = refPlanes.get(pl.ref);
+    if (!b) {
+      fieldErrors[`${f.id}:plane`] = "ese plano de referencia ya no existe (o va después)";
+      return { kind: "std", name: "XY", ...nums };
+    }
+    // el plano de referencia, como si fuera una cara, más el desfase y giros propios
+    return { kind: "face", origin: b.origin, normal: b.n, xDir: b.x, ...nums };
+  };
   const features = doc.features.map((f) => {
     const out: Record<string, unknown> = { ...f };
-    if (f.type === "sketch") {
-      out.plane = { ...f.plane, offset: ev(f.plane.offset, `${f.id}:offset`), tilt: ev(f.plane.tilt, `${f.id}:tilt`), turn: ev(f.plane.turn, `${f.id}:turn`) };
+    if (f.type === "plane") {
+      out.plane = resolvePlane(f);
+      out.size = ev(f.size, `${f.id}:size`, 80);
+      try { refPlanes.set(f.id, planeBasis(out.plane as never)); } catch { /* plano raro: sin referencia */ }
+    } else if (f.type === "sketch") {
+      out.plane = resolvePlane(f);
       out.profiles = f.profiles.map((p) => resolveProfile(f.id, p));
     } else {
       for (const k of NUM_FIELDS[f.type]) out[k] = ev((f as never)[k], `${f.id}:${k}`);

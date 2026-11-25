@@ -54,6 +54,9 @@ descargarlas como `.json` para pasarlas a otro).
 | **Texto en curva** | El texto puede «seguir la curva» de una cara cilíndrica (por fuera o por dentro de un vaso): cada letra se coloca tangente y da la vuelta. |
 | **Familia de tamaños** | Archivo → Familia de tamaños. Una tabla con los valores de tus variables para cada tamaño; «Ver» prueba uno y «Exportar todas» baja un ZIP con un 3MF/STL/STEP por tamaño. |
 | **Explosionar** | Separa las piezas de un ensamblaje (desde el centro o apiladas hacia arriba) con un deslizador, y graba un vídeo de 8 s (MP4 o WebM según el navegador). |
+| **¿Dónde dibujas?** | Al pulsar Boceto, la app pregunta siempre dónde: suelo, frente, lado, una cara de la pieza o uno de tus planos de referencia, y a qué distancia. |
+| **Plano ref.** | Planos de referencia propios (desplazados, inclinados, girados o sobre una cara). Sus bocetos lo siguen si lo mueves. |
+| **Mover con un clic** | Clic en un cuerpo (sin ningún paso abierto) y aparecen las flechas para moverlo o los aros para girarlo en X, Y o Z. Se guarda solo como paso «Mover»; varios arrastres seguidos se juntan en el mismo paso. Esc o clic en el vacío lo suelta. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |

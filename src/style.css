@@ -366,10 +366,20 @@ table.bom { border-collapse: collapse; width: 100%; font-size: 13px; }
 .relief-file .relief-pic { width: 64px; height: 64px; object-fit: contain; background: #fff; border: 1px solid var(--line, #ccc); border-radius: 6px; }
 
 /* vista explosionada (encima del panel de corte si están los dos) */
-.explpanel { bottom: 56px; }
-@media (max-width: 700px) { .explpanel { bottom: calc(140px + env(safe-area-inset-bottom)); } }
+.explpanel, .selpanel { bottom: 56px; }
+@media (max-width: 700px) { .explpanel, .selpanel { bottom: calc(140px + env(safe-area-inset-bottom)); } }
 /* familia de tamaños */
 .fam-vars { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 10px; }
 table.fam input { width: 100%; min-width: 60px; }
 table.fam tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .fam-act { white-space: nowrap; }
+
+/* ¿dónde dibujas el boceto? */
+.where-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 10px 0 14px; }
+.where-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2, var(--panel)); color: inherit; cursor: pointer; font: inherit; }
+.where-btn b { font-size: 22px; line-height: 1; color: var(--accent); }
+.where-btn span { font-weight: 600; }
+.where-btn small { color: var(--muted); font-size: 12px; }
+.where-btn:hover:not(:disabled) { border-color: var(--accent); }
+.where-btn:disabled { opacity: .45; cursor: default; }
+.where-off { max-width: 120px; }

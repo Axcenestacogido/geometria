@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, RefPlaneFeature, TransformFeature, PlaneDef, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -14,7 +14,7 @@ import { docForRow, rowFileName, rowFromDoc, currentRow } from "./family";
 import { makeZip } from "./zip";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
-import { Viewport, type ViewName } from "./viewport";
+import { Viewport, type ViewName, type GizmoDelta } from "./viewport";
 import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
 import { evaluate, fmt, VAR_NAME } from "./expr";
@@ -130,6 +130,7 @@ $("#app").innerHTML = `
     <div class="banner" id="banner" hidden></div>
     <div class="secpanel" id="secpanel" hidden></div>
     <div class="secpanel explpanel" id="explpanel" hidden></div>
+    <div class="secpanel selpanel" id="selpanel" hidden></div>
     <div class="sketch" id="sketch">
       <div class="sketchbar" id="sketchbar"></div>
       <div class="sketchhint" id="sketchhint"></div>
@@ -336,8 +337,11 @@ function setDoc(d: Doc, id = docId, resetHistory = true) {
   doc = d;
   docId = id;
   active = null;
+  selBody = null;
   resolved = resolveDoc(doc);
   sketcher.close();
+  $("#sketch").classList.remove("on");
+  document.body.classList.remove("sketching");
   if (resetHistory) history.reset(JSON.stringify(doc));
   storage.save(docId, doc);
   viewport.refit();
@@ -368,7 +372,7 @@ function renderUndo() {
 // ======================================================================
 
 const ADD: { type: Feature["type"]; key?: string }[] = [
-  { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
+  { type: "sketch" }, { type: "plane" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
   { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" }, { type: "catalog" }, { type: "split" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
@@ -377,12 +381,13 @@ const ADD: { type: Feature["type"]; key?: string }[] = [
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve",
+  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve", plane: "Plano ref.",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
   loft: "Transición suave entre dos o más bocetos (de cuadrado a círculo…)",
   text: "Letras en relieve o grabadas",
+  plane: "Plano de referencia: un plano tuyo (desplazado, inclinado o sobre una cara) para dibujar bocetos encima",
   relief: "Desde una imagen: un logo en relieve (o grabado) o una litofanía con las alturas de una foto",
   import: "Traer una pieza STEP o STL de otro programa",
   component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
@@ -408,7 +413,7 @@ function renderTools() {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
       title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : ADD_TITLE[t.type] ?? "",
-      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "relief" ? (replacingRelief = null, $("#filerelief").click()) : t.type === "component" ? componentDialog() : addFeature(t.type)),
+      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "relief" ? (replacingRelief = null, $("#filerelief").click()) : t.type === "component" ? componentDialog() : t.type === "sketch" || t.type === "plane" ? whereDialog(t.type) : addFeature(t.type)),
     }, h("b", {}, FEATURE_ICON[t.type]), ADD_LABEL[t.type] ?? FEATURE_LABEL[t.type]));
   }
 }
@@ -435,6 +440,7 @@ function setActive(id: string | null) {
   active = id;
   // al editar un paso las piezas vuelven a su sitio (los clics sobre caras tienen que cuadrar)
   if (id && explode) { explode = null; renderExplode(); }
+  if (id) selBody = null;
   pickingFace = false;
   const f = doc.features.find((x) => x.id === id);
   if (f?.type === "sketch") {
@@ -1189,7 +1195,7 @@ function renderProps() {
       sec.append(checkField("Hacer una copia (deja el original)", f.copy, (v) => (f.copy = v)));
       sec.append(h("div", { class: "seg-btns" },
         h("button", { class: `btn small ${gizmoMode === "translate" ? "on" : ""}`, onclick: () => { gizmoMode = "translate"; renderGizmo(); renderProps(); } }, "✥ Flechas: mover"),
-        h("button", { class: `btn small ${gizmoMode === "rotate" ? "on" : ""}`, onclick: () => { gizmoMode = "rotate"; renderGizmo(); renderProps(); } }, "⟳ Flechas: girar en Z"),
+        h("button", { class: `btn small ${gizmoMode === "rotate" ? "on" : ""}`, onclick: () => { gizmoMode = "rotate"; renderGizmo(); renderProps(); } }, "⟳ Flechas: girar"),
       ));
       sec.append(h("div", { class: "empty" }, "Arrastra las flechas en la vista 3D, o escribe los números."));
       sec.append(h("h3", { class: "mt" }, "Mover (mm)"));
@@ -1391,6 +1397,7 @@ function renderProps() {
     case "import": renderImportProps(sec, f); break;
     case "relief": renderReliefProps(sec, f); break;
     case "layflat": renderLayFlatProps(sec, f); break;
+    case "plane": renderRefPlaneProps(sec, f); break;
     case "component": renderComponentProps(sec, f); break;
   }
   sec.append(h("div", { class: "actions" },
@@ -1810,13 +1817,85 @@ function renderFeatureError() {
   box.textContent = err ?? "";
 }
 
-function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
+/** Planos de referencia que hay antes de un paso (o todos) */
+function refPlanesBefore(id?: string) {
+  const idx = id ? doc.features.findIndex((x) => x.id === id) : doc.features.length;
+  return doc.features.slice(0, idx < 0 ? doc.features.length : idx).filter((x): x is RefPlaneFeature => x.type === "plane" && !x.off);
+}
+
+/** Selector de plano para un boceto o un plano de referencia */
+function planeSelect(f: SketchFeature | RefPlaneFeature) {
   const pl = f.plane;
-  const planeOpts: [string, string][] = [["XY", "Suelo (XY)"], ["XZ", "Frente (XZ)"], ["YZ", "Lado (YZ)"]];
-  if (pl.kind === "face") planeOpts.push(["face", "Cara elegida"]);
-  sec.append(selectField("Plano", pl.kind === "std" ? pl.name : "face", planeOpts, (v) => {
-    if (v !== "face") f.plane = { kind: "std", name: v as StdPlane, offset: f.plane.offset, tilt: f.plane.tilt, turn: f.plane.turn };
-  }));
+  const opts: [string, string][] = [["XY", "Suelo (XY)"], ["XZ", "Frente (XZ)"], ["YZ", "Lado (YZ)"]];
+  for (const r of refPlanesBefore(f.id)) opts.push([`ref:${r.id}`, `▱ ${r.name}`]);
+  if (pl.kind === "face") opts.push(["face", "Cara elegida"]);
+  opts.push(["pick", "Elegir una cara de la pieza…"]);
+  const cur = pl.kind === "std" ? pl.name : pl.kind === "ref" ? `ref:${pl.ref}` : "face";
+  return selectField("Plano", cur, opts, (v) => {
+    const keep = { offset: f.plane.offset, tilt: f.plane.tilt, turn: f.plane.turn };
+    if (v === "pick") { startFacePick(); return; }
+    if (v.startsWith("ref:")) f.plane = { kind: "ref", ref: v.slice(4), ...keep };
+    else if (v !== "face") f.plane = { kind: "std", name: v as StdPlane, ...keep };
+  });
+}
+
+/** Antes de un boceto o un plano: ¿dónde? (suelo, frente, lado, una cara o uno de tus planos) */
+function whereDialog(type: "sketch" | "plane") {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const hasBody = !!build?.bodies.length;
+  const off = h("input", { value: type === "plane" ? "10" : "0", spellcheck: "false", class: "where-off" }) as HTMLInputElement;
+  const create = (plane: PlaneDef | null) => {
+    let offset = off.value.trim() || "0";
+    try { evaluate(offset, resolved.vars); } catch { off.classList.add("bad"); return; }
+    dlg.close();
+    const f = newFeature(doc, type) as SketchFeature | RefPlaneFeature;
+    if (plane) f.plane = { ...plane, offset } as PlaneDef;
+    else f.plane = { kind: "std", name: "XY", offset };
+    doc.features.push(f);
+    setActive(f.id);
+    changed(true, true);
+    if (!plane) startFacePick();
+  };
+  const big = (icon: string, label: string, small: string, fn: () => void, disabled = false) =>
+    h("button", { class: "where-btn", disabled, onclick: fn }, h("b", {}, icon), h("span", {}, label), h("small", {}, small));
+  const grid = h("div", { class: "where-grid" },
+    big("⬓", "Suelo", "Plano XY, mirando desde arriba", () => create({ kind: "std", name: "XY", offset: "0" })),
+    big("◧", "Frente", "Plano XZ, de pie, mirando de frente", () => create({ kind: "std", name: "XZ", offset: "0" })),
+    big("◨", "Lado", "Plano YZ, de pie, mirando de lado", () => create({ kind: "std", name: "YZ", offset: "0" })),
+    big("◩", "Una cara", hasBody ? "Haz clic en una cara plana de la pieza" : "Primero crea un sólido", () => create(null), !hasBody),
+    ...refPlanesBefore().map((r) => big("▱", r.name, "Tu plano de referencia", () => create({ kind: "ref", ref: r.id, offset: "0" }))),
+  );
+  dlg.append(
+    h("h2", {}, type === "sketch" ? "¿Dónde dibujas el boceto?" : "¿Dónde pones el plano?"),
+    grid,
+    h("div", { class: "field" }, h("label", {}, "Separado"), off, h("div", { class: "val" }, type === "sketch" ? "mm por encima del plano o la cara (0 = justo encima)" : "mm desde el plano o la cara; luego puedes inclinarlo")),
+    ...(type === "sketch" ? [h("div", { class: "empty" }, "¿Necesitas un plano a otra altura o inclinado que vayas a usar varias veces? Crea un «Plano ref.» y te saldrá aquí.")] : []),
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar")),
+  );
+  dlg.showModal();
+}
+
+function renderRefPlaneProps(sec: HTMLElement, f: RefPlaneFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  sec.append(planeSelect(f));
+  if (build?.errors[f.id] || resolved.fieldErrors[`${f.id}:plane`]) sec.append(h("div", { class: "msg err" }, resolved.fieldErrors[`${f.id}:plane`] ?? ""));
+  sec.append(exprField("Separado", () => f.plane.offset, (v) => (f.plane.offset = v), k("offset"), { hint: "mm en su perpendicular" }));
+  sec.append(exprField("Inclinación", () => f.plane.tilt ?? "0", (v) => (f.plane.tilt = v), k("tilt"), { unit: "°", hint: "gira sobre su eje X (rojo)" }));
+  sec.append(exprField("Giro", () => f.plane.turn ?? "0", (v) => (f.plane.turn = v), k("turn"), { unit: "°", hint: "gira dentro del plano" }));
+  sec.append(exprField("Tamaño en pantalla", () => f.size, (v) => (f.size = v), k("size"), { hint: "solo para verlo; el plano es infinito" }));
+  sec.append(h("div", { class: "seg-btns" }, h("button", { class: "btn small primary", onclick: () => {
+    const sk = newFeature(doc, "sketch") as SketchFeature;
+    sk.plane = { kind: "ref", ref: f.id, offset: "0" };
+    doc.features.push(sk);
+    setActive(sk.id);
+    changed(true, true);
+  } }, "✎ Dibujar un boceto aquí")));
+  sec.append(h("div", { class: "empty mt" }, "Un plano de referencia no crea volumen: sirve para dibujar bocetos encima. Si lo mueves, sus bocetos se mueven con él."));
+}
+
+function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
+  sec.append(planeSelect(f));
   sec.append(exprField("Desfase", () => f.plane.offset, (v) => (f.plane.offset = v), `${f.id}:offset`, { hint: "separa el plano en su normal" }));
   sec.append(exprField("Inclinación", () => f.plane.tilt ?? "0", (v) => (f.plane.tilt = v), `${f.id}:tilt`, { unit: "°", hint: "gira el plano sobre su eje X (rojo)" }));
   sec.append(exprField("Giro", () => f.plane.turn ?? "0", (v) => (f.plane.turn = v), `${f.id}:turn`, { unit: "°", hint: "gira el dibujo dentro del plano" }));
@@ -2009,6 +2088,14 @@ viewport.events.onFacePick = (point, normal) => {
     return;
   }
   if (!pickingFace) return;
+  if (f?.type === "plane") {
+    f.plane = { kind: "face", ...planeFromHit(point, normal), offset: "0" };
+    pickingFace = false;
+    viewport.pickMode = "none";
+    renderBanner();
+    changed(true, true);
+    return;
+  }
   if (f?.type !== "sketch") return;
   const pl = planeFromHit(point, normal);
   f.plane = { kind: "face", ...pl, offset: "0" };
@@ -2039,7 +2126,7 @@ function renderBanner() {
   if (pickingFace) {
     b.hidden = false;
     b.innerHTML = "";
-    b.append("Haz clic en una cara plana de la pieza", h("button", { class: "btn small", onclick: () => { pickingFace = false; viewport.pickMode = "none"; $("#sketch").classList.add("on"); renderBanner(); } }, "Cancelar"));
+    b.append("Haz clic en una cara plana de la pieza", h("button", { class: "btn small", onclick: () => { pickingFace = false; viewport.pickMode = "none"; if (f?.type === "sketch") $("#sketch").classList.add("on"); renderBanner(); } }, "Cancelar"));
   } else if (measuring) {
     b.hidden = false;
     b.innerHTML = "";
@@ -2086,19 +2173,95 @@ function renderMarks() {
     pins,
     plane: pickingFace ? null : plane,
   });
-  renderGizmo();
+  renderSelPanel();
 }
 
 // ---------- flechas para mover/girar ----------
 let gizmoMode: "translate" | "rotate" = "translate";
+/** cuerpo elegido con un clic en la vista (sin ningún paso abierto) */
+let selBody: string | null = null;
+function renderSelPanel() {
+  const p = $("#selpanel");
+  const b = selBody ? build?.bodies.find((x) => x.id === selBody) : undefined;
+  if (selBody && !b) selBody = null;
+  viewport.setSelected(selBody);
+  p.hidden = !selBody || !!active || !!explode;
+  p.innerHTML = "";
+  if (p.hidden || !b) { renderGizmo(); return; }
+  const mode = (m: "translate" | "rotate", label: string) => h("button", { class: `btn small ${gizmoMode === m ? "on" : ""}`, onclick: () => { gizmoMode = m; renderSelPanel(); } }, label);
+  p.append(
+    h("b", {}, b.name), mode("translate", "✥ Mover"), mode("rotate", "⟳ Girar"),
+    h("button", { class: "btn small", title: "Hacer una copia al lado y elegirla", onclick: () => {
+      const bb = viewport.bodyBox(b.id);
+      const t = newFeature(doc, "transform") as TransformFeature;
+      Object.assign(t, { body: b.id, copy: true, dx: fmt(bb ? Math.round((bb[1][0] - bb[0][0] + 5) * 10) / 10 : 20) });
+      doc.features.push(t);
+      selBody = t.id;
+      changed(true, true);
+    } }, "⧉ Copia"),
+    h("button", { class: "btn small", title: "Ver los números de este movimiento", onclick: () => {
+      const last = doc.features.at(-1);
+      if (last?.type === "transform" && last.body === b.id) setActive(last.id); else toast("Aún no has movido este cuerpo");
+    } }, "123"),
+    h("button", { class: "btn small", title: "Dejar de elegirlo", onclick: () => { selBody = null; renderSelPanel(); } }, "✕"),
+  );
+  renderGizmo();
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selBody && !active && !(document.activeElement instanceof HTMLInputElement)) { selBody = null; renderSelPanel(); }
+});
+viewport.events.onBodyClick = (id) => {
+  if (active || explode || measuring) return;
+  selBody = id;
+  renderSelPanel();
+};
 /** suma un número a una medida: si es un número suelto, lo cambia; si es una cuenta, le añade «+ n» */
 function addTo(expr: string, delta: number): string {
   if (Math.abs(delta) < 1e-9) return expr;
   if (/^\s*-?(\d+\.?\d*|\.\d+)\s*$/.test(expr)) return fmt(Number(expr) + delta);
   return `${expr} ${delta < 0 ? "-" : "+"} ${fmt(Math.abs(delta))}`;
 }
+const isZero = (e: string) => { try { return Math.abs(evaluate(e || "0", resolved.vars)) < 1e-9; } catch { return false; } };
+/**
+ * Suma lo movido con las flechas a un paso «Mover». Un giro solo se suma si el paso no gira ya
+ * en otro eje (girar en X y luego en Z no es lo mismo que sumar ángulos); si no, devuelve false.
+ */
+function addGizmo(f: TransformFeature, d: GizmoDelta): boolean {
+  const axes = (["rx", "ry", "rz"] as const).filter((k) => Math.abs(d[k]) > 1e-9);
+  const used = (["rx", "ry", "rz"] as const).filter((k) => !isZero(f[k]));
+  if (axes.length && used.some((k) => !axes.includes(k))) return false;
+  if (axes.length > 1) return false;
+  f.dx = addTo(f.dx, d.dx); f.dy = addTo(f.dy, d.dy); f.dz = addTo(f.dz, d.dz);
+  for (const k of axes) f[k] = addTo(f[k], d[k]);
+  return true;
+}
+/** Paso «Mover» nuevo para un cuerpo, justo después de «after» (o al final) */
+function newMove(body: string, d: GizmoDelta, after?: string): TransformFeature {
+  const t = newFeature(doc, "transform") as TransformFeature;
+  t.body = body;
+  addGizmo(t, d);
+  const i = after ? doc.features.findIndex((x) => x.id === after) : -1;
+  if (i >= 0) doc.features.splice(i + 1, 0, t); else doc.features.push(t);
+  return t;
+}
+
 function renderGizmo() {
   const f = doc.features.find((x) => x.id === active);
+  if (!f && selBody && build && !explode) {
+    // cuerpo elegido con un clic: se mueve o gira directamente
+    const center = viewport.bodyCenter(selBody);
+    if (!center) { viewport.setGizmo(null); return; }
+    viewport.setGizmo({
+      body: selBody, center, mode: gizmoMode,
+      onDone: (d) => {
+        const last = doc.features.at(-1);
+        // si lo último que hiciste fue mover este mismo cuerpo, se suma a ese paso (menos pasos en la lista)
+        if (!(last?.type === "transform" && !last.copy && !last.off && last.body === selBody && addGizmo(last, d))) newMove(selBody!, d);
+        changed(true, true);
+      },
+    });
+    return;
+  }
   if (f?.type !== "transform" || !build) { viewport.setGizmo(null); return; }
   const before = build.bodiesBefore[f.id] ?? [];
   const body = f.copy ? f.id : f.body || before[before.length - 1]?.id || "";
@@ -2107,8 +2270,13 @@ function renderGizmo() {
   viewport.setGizmo({
     body, center, mode: gizmoMode,
     onDone: (d) => {
-      f.dx = addTo(f.dx, d.dx); f.dy = addTo(f.dy, d.dy); f.dz = addTo(f.dz, d.dz); f.rz = addTo(f.rz, d.rz);
-      changed(true);
+      if (!addGizmo(f, d)) {
+        // girar en otro eje: va en un paso nuevo, justo detrás
+        const t = newMove(body, d, f.id);
+        toast("Giro en otro eje: va en un paso «Mover» nuevo");
+        setActive(t.id);
+      }
+      changed(true, true);
       renderProps();
     },
   });
@@ -2212,6 +2380,14 @@ function renderSketchLines() {
     const b = planeBasis(f.plane as never);
     const loops = f.profiles.map((p) => profileLoop(p as never).map(([u, v]) => toWorld(b, u, v)));
     out.push({ pts: loops, active: isActive });
+  }
+  // planos de referencia: un cuadrado con una cruz en el centro
+  for (const f of resolved.features) {
+    if (f.type !== "plane" || f.off) continue;
+    const b = planeBasis(f.plane as never);
+    const r = Math.max(5, f.size || 80) / 2, c = r / 8;
+    const sq = [[-r, -r], [r, -r], [r, r], [-r, r], [-r, -r]].map(([u, v]) => toWorld(b, u, v));
+    out.push({ pts: [sq, [toWorld(b, -c, 0), toWorld(b, c, 0)], [toWorld(b, 0, -c), toWorld(b, 0, c)]], active: f.id === active });
   }
   viewport.setSketchLines(out);
   renderMarks();

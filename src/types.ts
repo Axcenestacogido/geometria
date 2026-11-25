@@ -10,7 +10,9 @@ export type StdPlane = "XY" | "XZ" | "YZ";
 /** tilt = inclinación alrededor del eje X del plano; turn = giro alrededor de su normal (grados) */
 export type PlaneDef =
   | { kind: "std"; name: StdPlane; offset: Expr; tilt?: Expr; turn?: Expr }
-  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: Expr; tilt?: Expr; turn?: Expr };
+  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: Expr; tilt?: Expr; turn?: Expr }
+  /** sobre un plano de referencia tuyo (paso «Plano»), por su id */
+  | { kind: "ref"; ref: string; offset: Expr; tilt?: Expr; turn?: Expr };
 
 export interface PolyPoint {
   x: Expr;
@@ -289,6 +291,14 @@ export interface ReliefFeature extends SolidOpBase {
   x: Expr; y: Expr; z: Expr;
 }
 
+/** Plano de referencia: un plano con nombre para dibujar bocetos encima (no crea volumen) */
+export interface RefPlaneFeature extends FeatureBase {
+  type: "plane";
+  plane: PlaneDef;
+  /** lado del cuadrado que lo dibuja en 3D (mm) */
+  size: Expr;
+}
+
 /** Apoyar la pieza sobre una cara para imprimir (gira todos los cuerpos y los baja a Z = 0) */
 export interface LayFlatFeature extends FeatureBase {
   type: "layflat";
@@ -400,6 +410,7 @@ export type Feature =
   | LoftFeature
   | ImportFeature
   | ReliefFeature
+  | RefPlaneFeature
   | LayFlatFeature
   | ComponentFeature;
 
