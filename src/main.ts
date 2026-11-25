@@ -137,6 +137,7 @@ $("#app").innerHTML = `
     <div class="secpanel" id="secpanel" hidden></div>
     <div class="secpanel explpanel" id="explpanel" hidden></div>
     <div class="secpanel selpanel" id="selpanel" hidden></div>
+    <div class="secpanel hidechip" id="hidechip" hidden></div>
     <div class="sketch" id="sketch">
       <div class="sketchbar" id="sketchbar"></div>
       <div class="sketchhint" id="sketchhint"></div>
@@ -205,6 +206,7 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
       if (!$("#props").contains(document.activeElement)) renderProps();
     }
     viewport.setBodies(m.bodies, doc.colors ?? {});
+    if (hiddenBodies.size) renderHidden();
     if (section) viewport.setSection(section);
     lastBuildFull = buildFullBySeq === m.seq;
     if (lastBuildFull && m.bodies.length) scheduleThumb();
@@ -344,6 +346,8 @@ function setDoc(d: Doc, id = docId, resetHistory = true) {
   docId = id;
   active = null;
   selBody = null;
+  hiddenBodies.clear();
+  renderHidden();
   resolved = resolveDoc(doc);
   sketcher.close();
   $("#sketch").classList.remove("on");
@@ -2291,6 +2295,91 @@ viewport.events.onFaceDouble = (point, normal) => {
   changed(true, true);
   sketcher.refitSoon();
 };
+// ---------- ocultar / aislar y menú del botón derecho ----------
+/** cuerpos ocultos: solo en la vista (se siguen exportando y calculando) */
+const hiddenBodies = new Set<string>();
+function renderHidden() {
+  if (selBody && hiddenBodies.has(selBody)) { selBody = null; renderSelPanel(); }
+  viewport.setHidden(hiddenBodies);
+  const p = $("#hidechip");
+  const n = [...hiddenBodies].filter((id) => build?.bodies.some((b) => b.id === id)).length;
+  p.hidden = !n;
+  p.innerHTML = "";
+  if (n) p.append(h("span", { title: "Solo en la vista: se siguen exportando" }, n === 1 ? "1 pieza oculta" : `${n} piezas ocultas`),
+    h("button", { class: "btn small", onclick: showAll }, "👁 Mostrar todo"));
+}
+/** al «ver solo esta» se acerca la cámara; al volver a mostrar todo, se encaja otra vez */
+let isolated = false;
+function showAll() { hiddenBodies.clear(); renderHidden(); if (isolated) { isolated = false; viewport.fit(); } }
+function hideBody(id: string) {
+  hiddenBodies.add(id);
+  renderHidden();
+  const b = build?.bodies.find((x) => x.id === id);
+  toast(`Oculta «${b?.name ?? "pieza"}»`, { label: "Deshacer", run: () => { hiddenBodies.delete(id); renderHidden(); } });
+}
+/** deja solo esa pieza a la vista; si ya estaba sola, vuelve a mostrar todo */
+function isolateBody(id: string) {
+  const others = (build?.bodies ?? []).filter((b) => b.id !== id).map((b) => b.id);
+  if (others.length && others.every((o) => hiddenBodies.has(o)) && !hiddenBodies.has(id)) { showAll(); return; }
+  hiddenBodies.clear();
+  others.forEach((o) => hiddenBodies.add(o));
+  renderHidden();
+  isolated = true;
+  viewport.fit();
+}
+const nn = (...xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement => !!x);
+function closeMenu() { document.querySelectorAll(".ctxmenu").forEach((x) => x.remove()); }
+function bodyMenu(id: string | null, x: number, y: number) {
+  closeMenu();
+  if (active || explode || measuring) return;
+  const b = id ? build?.bodies.find((q) => q.id === id) : undefined;
+  const item = (label: string, key: string, run: () => void, cls = "") =>
+    h("button", { class: `ctx-i ${cls}`, onclick: () => { closeMenu(); run(); } }, h("span", {}, label), key ? h("kbd", {}, key) : null);
+  const m = h("div", { class: "ctxmenu", role: "menu" });
+  if (b) {
+    const step = doc.features.find((f) => f.id === b.id);
+    const pick = (mode: "translate" | "rotate") => { selBody = b.id; gizmoMode = mode; renderSelPanel(); };
+    const cur = doc.colors?.[b.id];
+    const colorRow = h("div", { class: "ctx-colors" }, ...PALETTE.map((c) => {
+      // el color va por estilo de JavaScript: la CSP del servidor no deja estilos escritos en el HTML
+      const sw = h("button", { class: `ctx-sw ${cur === c ? "on" : ""}`, title: "Poner este color", onclick: () => { closeMenu(); (doc.colors ??= {})[b.id] = c; changed(true); } });
+      sw.style.background = c;
+      return sw;
+    }),
+      h("button", { class: "ctx-sw none", title: "Color normal", onclick: () => { closeMenu(); if (doc.colors) delete doc.colors[b.id]; changed(true); } }, "×"));
+    m.append(...nn(
+      h("div", { class: "menu-h" }, b.name),
+      item("✥ Mover", "G", () => pick("translate")),
+      item("⟳ Girar", "R", () => pick("rotate")),
+      item("⧉ Hacer una copia", "Ctrl D", () => { pick("translate"); ($("#selpanel").querySelector("[data-copy]") as HTMLButtonElement | null)?.click(); }),
+      colorRow,
+      h("hr"),
+      item("◌ Ocultar", "V", () => hideBody(b.id)),
+      item("◎ Ver solo esta", "I", () => isolateBody(b.id)),
+      hiddenBodies.size ? item("👁 Mostrar todo", "", showAll) : null,
+      h("hr"),
+      step ? item("✎ Cambiar sus medidas", "", () => setActive(step.id)) : null,
+      step ? item("✕ Borrar", "", () => removeFeature(step.id), "danger") : null,
+    ));
+  } else {
+    m.append(...nn(
+      hiddenBodies.size ? item("👁 Mostrar todo", "", showAll) : null,
+      item("⤢ Encajar la vista", "0", () => viewport.fit()),
+      item("✎ Boceto nuevo", "B", () => useTool("sketch")),
+      item("▣ Caja", "C", () => useTool("box")),
+    ));
+  }
+  document.body.append(m);
+  // que no se salga de la pantalla
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.max(4, Math.min(x, innerWidth - r.width - 4))}px`;
+  m.style.top = `${Math.max(4, Math.min(y, innerHeight - r.height - 4))}px`;
+}
+document.addEventListener("pointerdown", (e) => { if (!(e.target as HTMLElement).closest?.(".ctxmenu")) closeMenu(); }, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+addEventListener("resize", closeMenu);
+viewport.events.onBodyMenu = (id, x, y) => bodyMenu(id, x, y);
+
 viewport.events.onBodyClick = (id) => {
   if (active || explode || measuring) return;
   selBody = id;
@@ -3000,6 +3089,9 @@ document.addEventListener("keydown", (e) => {
   if (k === "?" || (e.shiftKey && k === "¿")) { keysDialog(); return; }
   if (k === "n") { fileAction("new"); return; }
   if (k === "o") { openDialog(); return; }
+  if (selBody && !f && k === "v") { hideBody(selBody); return; }
+  if (selBody && !f && k === "i") { isolateBody(selBody); return; }
+  if (!f && k === "v" && hiddenBodies.size) { showAll(); return; }
   if (selBody && !f && (k === "g" || k === "r")) { gizmoMode = k === "g" ? "translate" : "rotate"; renderSelPanel(); return; }
   if (k === "0" || k === "inicio") { viewport.fit(); return; }
   const tool = (Object.entries(TOOL_KEY) as [Feature["type"], string][]).find(([, key]) => key.toLowerCase() === k)?.[0];
@@ -3033,7 +3125,7 @@ function keysDialog() {
       )),
       h("table", {}, h("tbody", {},
         h("tr", {}, h("th", { colspan: "2" }, "Pieza elegida (clic)")),
-        row("G", "Flechas para mover"), row("R", "Aros para girar"), row("Ctrl D", "Copia al lado"),
+        row("G", "Flechas para mover"), row("R", "Aros para girar"), row("Ctrl D", "Copia al lado"), row("V", "Ocultar la pieza elegida (sin ninguna: mostrar todo)"), row("I", "Ver solo la pieza elegida"), row("Botón derecho", "Menú de la pieza"),
         h("tr", {}, h("th", { colspan: "2" }, "Vista")),
         row("Doble clic en cara", "Boceto sobre esa cara"),
         h("tr", {}, h("th", { colspan: "2" }, "En el boceto")),

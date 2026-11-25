@@ -16,6 +16,8 @@ export interface ViewportEvents {
   onMeasure?: (points: Vec3[]) => void;
   /** clic sin herramienta: el cuerpo que hay debajo (o null si es el vacío) */
   onBodyClick?: (id: string | null) => void;
+  /** botón derecho sin arrastrar: cuerpo debajo (o null) y dónde abrir el menú */
+  onBodyMenu?: (id: string | null, x: number, y: number) => void;
   /** doble clic sobre una cara sin herramienta: para dibujar encima */
   onFaceDouble?: (point: Vec3, normal: Vec3) => void;
 }
@@ -116,6 +118,17 @@ export class Viewport {
       if (moved < (this.touch ? 12 : 5) && e.button === 0) this.click(e);
     });
     el.addEventListener("pointermove", (e) => this.hover(e));
+    // botón derecho: menú de la pieza, al soltar y solo si no has arrastrado para mover la vista
+    // (en Mac y Linux el navegador avisa al pulsar; esperando a soltar va igual en todos)
+    let right: { x: number; y: number } | null = null;
+    el.addEventListener("pointerdown", (e) => { right = e.button === 2 ? { x: e.clientX, y: e.clientY } : null; });
+    el.addEventListener("pointerup", (e) => {
+      const r = right;
+      right = null;
+      if (e.button !== 2 || !r || this.pickMode !== "none" || Math.hypot(e.clientX - r.x, e.clientY - r.y) > 5) return;
+      this.events.onBodyMenu?.(this.pickBody(e), e.clientX, e.clientY);
+    });
+    el.addEventListener("contextmenu", (e) => e.preventDefault());
     el.addEventListener("dblclick", (e) => {
       if (this.pickMode !== "none" || this.explodeK > 0) return;
       const f = this.pickFace(e as PointerEvent);
@@ -469,6 +482,7 @@ export class Viewport {
     }
     this.applyClip();
     this.applyExplode();
+    this.applyHidden();
     if (this.selected) this.setSelected(this.selected);
     if (this.needsFit && bodies.length) {
       this.needsFit = false;
@@ -636,7 +650,7 @@ export class Viewport {
     if (onEdge) {
       let best: THREE.Vector3 | null = null, bd = tol;
       const a = new THREE.Vector3();
-      for (const eo of this.edgeObjects) for (const g of eo.groups) {
+      for (const eo of this.edgeObjects) if (eo.line.visible) for (const g of eo.groups) {
         for (const i of [g.start, g.start + g.count - 3]) {
           a.fromArray(eo.pts, i);
           const d = a.distanceTo(onEdge);
@@ -666,6 +680,7 @@ export class Viewport {
     let best: { d: number; arr: Float32Array } | null = null;
     const a = new THREE.Vector3(), b = new THREE.Vector3(), line = new THREE.Line3(), q = new THREE.Vector3();
     for (const eo of this.edgeObjects) {
+      if (!eo.line.visible) continue;
       for (const g of eo.groups) {
         let d = Infinity;
         for (let i = g.start; i < g.start + g.count; i += 6) {
@@ -718,7 +733,7 @@ export class Viewport {
 
   private pickEdge(e: PointerEvent): THREE.Vector3 | null {
     const rc = this.ray(e);
-    const hits = rc.intersectObjects(this.edgeObjects.map((o) => o.line), false).filter((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
+    const hits = rc.intersectObjects(this.edgeObjects.filter((o) => o.line.visible).map((o) => o.line), false).filter((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hits.length) return null;
     // proyectar el punto exactamente sobre el segmento tocado
     const h = hits[0];
@@ -732,11 +747,21 @@ export class Viewport {
 
   private pickFace(e: PointerEvent) {
     const rc = this.ray(e);
-    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap);
+    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap && c.visible);
     // con corte, lo que está al otro lado del plano no se puede tocar
     const hit = rc.intersectObjects(meshes, false).find((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hit || !hit.face) return null;
     return { point: hit.point, normal: hit.face.normal.clone() };
+  }
+
+  /** Cuerpos ocultos (solo en la vista: se siguen exportando) */
+  private hiddenIds = new Set<string>();
+  setHidden(ids: Iterable<string>) {
+    this.hiddenIds = new Set(ids);
+    this.applyHidden();
+  }
+  private applyHidden() {
+    for (const c of this.bodiesGroup.children) c.visible = !this.hiddenIds.has(c.userData.body as string);
   }
 
   /** Cuerpo elegido con un clic: se ve resaltado */
@@ -753,7 +778,7 @@ export class Viewport {
   }
 
   private pickBody(e: PointerEvent): string | null {
-    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap);
+    const meshes = this.bodiesGroup.children.filter((c) => (c as THREE.Mesh).isMesh && !c.userData.cap && c.visible);
     const hit = this.ray(e).intersectObjects(meshes, false)[0];
     return hit ? (hit.object.userData.body as string) : null;
   }
@@ -832,7 +857,9 @@ export class Viewport {
   }
 
   fit() {
-    const box = new THREE.Box3().setFromObject(this.bodiesGroup);
+    // solo lo que se ve: con piezas ocultas, encaja las que quedan
+    const box = new THREE.Box3();
+    for (const c of this.bodiesGroup.children) if (c.visible) box.expandByObject(c);
     if (box.isEmpty()) box.set(new THREE.Vector3(-50, -50, 0), new THREE.Vector3(50, 50, 30));
     const size = box.getSize(new THREE.Vector3()).length();
     const center = box.getCenter(new THREE.Vector3());
