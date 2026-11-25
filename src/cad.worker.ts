@@ -1201,18 +1201,85 @@ function meshBody(b: Body): BodyMesh {
   const tol = b.coarse ? 0.1 : 0.05, ang = b.coarse ? 0.5 : 0.25;
   const m = b.shape.mesh({ tolerance: tol, angularTolerance: ang });
   const e = b.shape.meshEdges({ tolerance: tol, angularTolerance: ang });
+  let lines = new Float32Array(e.lines);
+  let edgeGroups = e.edgeGroups.map((g) => ({ start: g.start, count: g.count }));
+  if (b.coarse) ({ lines, edgeGroups } = threadEdges(m.vertices, m.normals, m.triangles, m.faceGroups, lines, edgeGroups));
   return {
     id: b.id,
     name: b.name,
     vertices: new Float32Array(m.vertices),
-    normals: new Float32Array(m.normals),
+    // en las roscas, las normales de OpenCascade salen a trozos (la rosca se ve moteada): mejor sacarlas de los triángulos
+    normals: b.coarse ? triangleNormals(m.vertices, m.triangles) : new Float32Array(m.normals),
     triangles: new Uint32Array(m.triangles),
-    lines: new Float32Array(e.lines),
-    edgeGroups: e.edgeGroups.map((g) => ({ start: g.start, count: g.count })),
+    lines,
+    edgeGroups,
     faceGroups: m.faceGroups.map((g) => ({ start: g.start, count: g.count })),
     volume: safeNum(() => R.measureVolume(b.shape)),
     area: safeNum(() => R.measureArea(b.shape)),
   };
+}
+
+/**
+ * Piezas con rosca: la rosca está hecha de muchas caras curvas, y cada unión entre ellas es una
+ * arista (en espiral). Dibujarlas todas deja la rosca casi negra. Se quitan las aristas entre dos
+ * caras curvas; quedan las que tocan una cara plana (el hexágono, las puntas, los cortes).
+ * Los grupos de aristas van en puntos (como los da replicad).
+ */
+function threadEdges(V: ArrayLike<number>, N: ArrayLike<number>, T: ArrayLike<number>, faces: { start: number; count: number }[], lines: Float32Array<ArrayBuffer>, groups: { start: number; count: number }[]) {
+  const key = (x: number, y: number, z: number) => `${Math.round(x * 1e4)},${Math.round(y * 1e4)},${Math.round(z * 1e4)}`;
+  const faceOf = new Int32Array(V.length / 3).fill(-1);
+  faces.forEach((f, fi) => { for (let t = f.start; t < f.start + f.count; t++) faceOf[T[t]] = fi; });
+  // ¿cara plana? todas sus normales iguales
+  const flat = faces.map((f) => {
+    const i0 = T[f.start];
+    for (let t = f.start; t < f.start + f.count; t++) {
+      const i = T[t];
+      if (N[i * 3] * N[i0 * 3] + N[i * 3 + 1] * N[i0 * 3 + 1] + N[i * 3 + 2] * N[i0 * 3 + 2] < 0.9998) return false;
+    }
+    return true;
+  });
+  const facesAt = new Map<string, Set<number>>();
+  for (let i = 0; i < V.length / 3; i++) {
+    const k = key(V[i * 3], V[i * 3 + 1], V[i * 3 + 2]);
+    let set = facesAt.get(k);
+    if (!set) facesAt.set(k, (set = new Set()));
+    set.add(faceOf[i]);
+  }
+  const at = (p: number) => facesAt.get(key(lines[p * 3], lines[p * 3 + 1], lines[p * 3 + 2]));
+  const keep = groups.filter((g) => {
+    const a = at(g.start), z = at(g.start + g.count - 1);
+    if (!a || !z) return true;
+    const both = [...a].filter((f) => f >= 0 && z.has(f));
+    if (both.length < 2) return true; // no se sabe: se deja
+    return both.some((f) => flat[f]);
+  });
+  if (keep.length === groups.length) return { lines, edgeGroups: groups };
+  const out = new Float32Array(keep.reduce((n, g) => n + g.count * 3, 0));
+  const edgeGroups: { start: number; count: number }[] = [];
+  let o = 0;
+  for (const g of keep) {
+    out.set(lines.subarray(g.start * 3, (g.start + g.count) * 3), o * 3);
+    edgeGroups.push({ start: o, count: g.count });
+    o += g.count;
+  }
+  return { lines: out, edgeGroups };
+}
+
+/** Normales de cada vértice a partir de sus triángulos (las caras grandes pesan más) */
+function triangleNormals(V: ArrayLike<number>, T: ArrayLike<number>): Float32Array {
+  const N = new Float32Array(V.length);
+  for (let t = 0; t < T.length; t += 3) {
+    const a = T[t] * 3, b = T[t + 1] * 3, c = T[t + 2] * 3;
+    const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2];
+    const vx = V[c] - V[a], vy = V[c + 1] - V[a + 1], vz = V[c + 2] - V[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const i of [a, b, c]) { N[i] += nx; N[i + 1] += ny; N[i + 2] += nz; }
+  }
+  for (let i = 0; i < N.length; i += 3) {
+    const l = Math.hypot(N[i], N[i + 1], N[i + 2]) || 1;
+    N[i] /= l; N[i + 1] /= l; N[i + 2] /= l;
+  }
+  return N;
 }
 
 function safeNum(fn: () => number) {

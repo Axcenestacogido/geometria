@@ -470,7 +470,7 @@ export class Viewport {
     for (const g of [this.bodiesGroup, this.checkGroup, this.markGroup, this.clashGroup, this.compareGroup]) g.traverse((o) => {
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
       if (m) { m.clippingPlanes = planes; m.needsUpdate = true; }
-      if (o.userData.cap) o.visible = !!this.section;
+      if (o.userData.cap) o.visible = !!this.section && !this.hiddenIds.has(o.userData.body as string);
     });
   }
 
@@ -1006,7 +1006,8 @@ export class Viewport {
     this.applyHidden();
   }
   private applyHidden() {
-    for (const c of this.bodiesGroup.children) c.visible = !this.hiddenIds.has(c.userData.body as string);
+    // la tapa del corte solo se ve con la vista de corte puesta
+    for (const c of this.bodiesGroup.children) c.visible = !this.hiddenIds.has(c.userData.body as string) && (!c.userData.cap || !!this.section);
   }
 
   /** Cuerpo elegido con un clic: se ve resaltado */
