@@ -220,28 +220,87 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin:
   #printarea svg { width: 297mm; height: 210mm; display: block; }
 }
 
+/* barra de la vista: herramientas y vistas */
+.vb-tools, .vb-views { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.rbtn i { font-style: normal; margin-right: 4px; }
+.vb-views .rbtn i { display: none; }
+.viewpick select { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.viewpick { position: relative; }
+.dock, .undo-float { display: none; }
+
+/* ===== Móvil: la vista ocupa toda la pantalla; todo lo demás flota encima ===== */
 @media (max-width: 700px) {
-  .mobile-only { display: inline-block; }
+  .mobile-only { display: inline-flex; }
   .desk-only { display: none; }
-  #app { height: auto; min-height: 100%; }
-  /* la vista 3D se queda arriba fija y los paneles pasan por debajo */
-  .main { grid-template-rows: 48vh auto auto; }
-  .view { position: sticky; top: 0; z-index: 4; border-bottom: 1px solid var(--line); }
-  #props { scroll-margin-top: 49vh; }
-  .top { padding: 6px 8px; gap: 6px; }
+  html, body { overflow: hidden; overscroll-behavior: none; }
+  #app { display: block; height: 100dvh; position: relative; }
+  .main { display: block; position: fixed; inset: 0; }
+  .view { position: absolute; inset: 0; }
+  .status { display: none; }
+
+  /* arriba: nombre, deshacer y menús como pastillas flotantes */
+  .top { position: fixed; top: 0; left: 0; right: 0; z-index: 20; background: transparent; border: 0; padding: calc(8px + env(safe-area-inset-top)) 10px 0; gap: 6px; flex-wrap: nowrap; pointer-events: none; }
+  .top > * { pointer-events: auto; }
+  .brand { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 6px; box-shadow: 0 2px 10px #0001; }
   .brand span { display: none; }
-  .docname { min-width: 0; order: 10; flex: 1 1 100%; max-width: none; }
-  .sketchhint { font-size: 11px; max-height: 3.2em; overflow: hidden; }
-  .viewbar { left: 6px; right: 6px; top: 6px; justify-content: flex-start; }
-  .viewbar .sep { display: none; }
-  .banner { top: auto; bottom: 10px; max-width: 94%; flex-wrap: wrap; font-size: 12px; }
-  .secpanel { left: 6px; right: 6px; bottom: 6px; border-radius: 12px; flex-wrap: wrap; }
+  .docname { flex: 1 1 auto; min-width: 0; max-width: none; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 7px 10px; box-shadow: 0 2px 10px #0001; }
+  .top .spacer { display: none; }
+  .top .btn { border-radius: 12px; padding: 7px 10px; box-shadow: 0 2px 10px #0001; }
+  .top #undo, .top #redo { display: none; }
+  .menu > .btn { font-size: 13px; }
+  .menu-list { right: 0; left: auto; max-width: 86vw; }
+
+  /* raíles a los lados, con icono y texto pequeño debajo */
+  .viewbar { display: contents; }
+  .viewbar > .sep { display: none; }
+  .vb-tools, .vb-views { position: absolute; top: calc(64px + env(safe-area-inset-top)); z-index: 5; flex-direction: column; flex-wrap: nowrap; gap: 2px;
+    background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line); border-radius: 14px; padding: 4px; box-shadow: 0 4px 14px #0002; }
+  .vb-tools { left: 8px; }
+  .vb-views { right: 8px; }
+  .rbtn { display: flex; flex-direction: column; align-items: center; gap: 1px; width: 60px; padding: 6px 2px; border: 0; background: none; border-radius: 10px; font-size: 10.5px; color: var(--muted); }
+  .rbtn i, .vb-views .rbtn i { display: block; margin: 0; font-size: 19px; line-height: 1.1; color: var(--text); }
+  .rbtn.on { background: var(--accent-soft); color: var(--accent); }
+  .rbtn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+  /* deshacer/rehacer flotando sobre el dock */
+  .undo-float { display: flex; position: absolute; left: 8px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 5; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 3px; box-shadow: 0 4px 14px #0002; }
+  .undo-float .btn { border: 0; background: none; font-size: 20px; padding: 6px 14px; }
+  body.sheet-open .undo-float { display: none; }
+
+  /* dock de abajo */
+  .dock { display: flex; position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 4px; box-shadow: 0 6px 20px #0003; }
+  .dock button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; border: 0; background: none; padding: 7px 2px; border-radius: 13px; font-size: 11px; color: var(--muted); cursor: pointer; }
+  .dock button i { font-style: normal; font-size: 19px; line-height: 1; color: var(--text); }
+  .dock button.on { background: var(--accent-soft); color: var(--accent); }
+  .dock button.on i { color: var(--accent); }
+  body.sketching .dock, body.sketching .top { display: none; }
+
+  /* paneles que suben desde abajo */
+  .side, .side.right { position: fixed; left: 8px; right: 8px; bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 25; max-height: 52dvh; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 10px 30px #0003; display: none; flex-direction: column; }
+  /* lo que se desplaza va dentro (un panel con scroll encima del 3D da fallos de dibujo) */
+  .side > .section, .props-in { display: none; border-bottom: 0; overflow: auto; min-height: 0; flex: 1 1 auto; overscroll-behavior: contain; }
+  body.sheet-add .side:not(.right), body.sheet-steps .side:not(.right), body.sheet-vars .side:not(.right), body.sheet-props .side.right { display: flex; }
+  body.sheet-add #sec-add, body.sheet-steps #sec-steps, body.sheet-vars #sec-vars, body.sheet-props .props-in { display: block; }
+  body.sheet-open .vb-tools, body.sheet-open .vb-views { display: none; }
+
+  .tools { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .tool { padding: 9px 2px; font-size: 11px; border-radius: 10px; }
+  .tool b { font-size: 20px; }
+
+  .banner { top: calc(64px + env(safe-area-inset-top)); left: 74px; right: 74px; transform: none; max-width: none; flex-wrap: wrap; font-size: 12px; border-radius: 14px; }
+  .secpanel { left: 8px; right: 8px; bottom: calc(84px + env(safe-area-inset-bottom)); border-radius: 14px; flex-wrap: wrap; }
   .secpanel input[type=range] { flex: 1; min-width: 120px; }
-  .sketchbar { left: 6px; right: 6px; top: 6px; }
-  .tools { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-  .status { flex-wrap: wrap; gap: 6px 12px; }
-  .menu-list { right: auto; left: 0; }
-  #m-export .menu-list { right: 0; left: auto; }
+  body.sheet-open .secpanel { display: none; }
+  .toast { bottom: calc(90px + env(safe-area-inset-bottom)); }
+
+  /* boceto: barra de herramientas abajo, desplazable de lado */
+  .sketchbar { top: auto; bottom: calc(8px + env(safe-area-inset-bottom)); left: 8px; right: 8px; flex-wrap: nowrap; overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 6px; box-shadow: 0 6px 20px #0003; scrollbar-width: none; }
+  .sketchbar .spacer { display: none; }
+  .sketchbar .btn { flex: 0 0 auto; }
+  .sketchbar .btn.primary { order: -1; }
+  .sketchhint { top: calc(8px + env(safe-area-inset-top)); bottom: auto; left: 8px; right: 8px; font-size: 11px; max-height: 3.2em; overflow: hidden; background: color-mix(in srgb, var(--paper) 85%, transparent); border-radius: 10px; padding: 4px 8px; }
+  dialog { padding: 14px; }
+  .sheet { width: 92vw; }
 }
 @media (pointer: coarse) {
   .btn.small { padding: 6px 10px; font-size: 13px; }

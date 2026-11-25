@@ -87,6 +87,36 @@ export interface BoxFeature extends SolidOpBase {
   w: Expr; d: Expr; h: Expr;
 }
 
+/** Engranaje recto (evolvente, 20°) */
+export interface GearFeature extends SolidOpBase {
+  type: "gear";
+  /** centro de la cara de abajo */
+  x: Expr; y: Expr; z: Expr;
+  module: Expr;
+  teeth: Expr;
+  thickness: Expr;
+  /** agujero del eje (0 = sin agujero) */
+  bore: Expr;
+  fit: Expr;
+  /** giro alrededor de Z (°), para que dos ruedas encajen */
+  angle: Expr;
+}
+
+/** Muelle helicoidal (de compresión) */
+export interface SpringFeature extends SolidOpBase {
+  type: "spring";
+  x: Expr; y: Expr; z: Expr;
+  /** diámetro exterior */
+  diameter: Expr;
+  /** grosor del hilo */
+  wire: Expr;
+  /** distancia entre vueltas */
+  pitch: Expr;
+  turns: Expr;
+  /** puntas planas para que apoye bien */
+  flat: boolean;
+}
+
 export interface CylinderFeature extends SolidOpBase {
   type: "cylinder";
   x: Expr; y: Expr; z: Expr;
@@ -247,6 +277,8 @@ export type Feature =
   | BoxFeature
   | CylinderFeature
   | SphereFeature
+  | GearFeature
+  | SpringFeature
   | EdgeFeature
   | ShellFeature
   | PatternFeature

@@ -8,6 +8,9 @@ import * as R from "replicad";
 import { planeBasis, scale as vscale, type Basis } from "./geom";
 import { buildModel3mf } from "./threemf";
 import { SCREWS } from "./screws";
+import { gearOutline } from "./gear";
+/** pasos cuyo sólido conviene dibujar con menos detalle */
+const coarseIds = new Set<string>();
 import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView } from "./types";
 import interRegular from "./fonts/Inter-Regular.otf?url";
 import interBold from "./fonts/Inter-Bold.otf?url";
@@ -825,6 +828,39 @@ function runFeatures(features: RF[], upTo?: string) {
           if (f.r <= 0 || f.h <= 0) throw new Error("las medidas deben ser mayores que 0");
           shape = R.makeCylinder(f.r, f.h, [f.x, f.y, f.z], [0, 0, 1]) as Shape;
           break;
+        case "gear": {
+          if (f.thickness <= 0) throw new Error("el grosor debe ser mayor que 0");
+          const pts = gearOutline({ m: f.module, z: Math.round(f.teeth), fit: f.fit });
+          let pen = R.draw(pts[0]);
+          for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+          let d: R.Drawing = pen.close();
+          if (f.bore > 0) {
+            if (f.bore / 2 >= (f.module * f.teeth) / 2 - 1.5 * f.module) throw new Error("el agujero es más grande que la rueda");
+            d = d.cut(R.drawCircle(f.bore / 2));
+          }
+          shape = d.sketchOnPlane("XY").extrude(f.thickness) as Shape;
+          if (f.angle) shape = shape.rotate(f.angle, [0, 0, 0], [0, 0, 1]) as Shape;
+          shape = shape.translate([f.x, f.y, f.z]) as Shape;
+          break;
+        }
+        case "spring": {
+          const Rm = (f.diameter - f.wire) / 2;
+          if (f.wire <= 0 || Rm <= f.wire / 2) throw new Error("el diámetro tiene que ser mayor que dos hilos");
+          if (f.pitch <= f.wire) throw new Error("la distancia entre vueltas tiene que ser mayor que el hilo (si no, se pegan)");
+          if (f.turns <= 0 || f.turns > 60) throw new Error("las vueltas tienen que estar entre 0 y 60");
+          const H = f.pitch * f.turns;
+          const helix = R.makeHelix(f.pitch, H, Rm, [0, 0, 0], [0, 0, 1]);
+          const t = helix.tangentAt(0);
+          const circ = R.drawCircle(f.wire / 2).sketchOnPlane(new R.Plane([Rm, 0, 0], [1, 0, 0], [t.x, t.y, t.z])) as R.Sketch;
+          let sp = R.genericSweep(circ.wire, helix, { frenet: true }, false) as Shape;
+          if (f.flat) {
+            // puntas planas: se recorta medio hilo arriba y abajo para que apoye
+            sp = sp.intersect(R.makeBox([-f.diameter, -f.diameter, 0], [f.diameter, f.diameter, H]) as Shape) as Shape;
+          } else sp = sp.translate([0, 0, f.wire / 2]) as Shape;
+          shape = sp.translate([f.x, f.y, f.z]) as Shape;
+          coarseIds.add(f.id);
+          break;
+        }
         case "sphere":
           if (f.r <= 0) throw new Error("el radio debe ser mayor que 0");
           shape = R.makeSphere(f.r).translate(f.x, f.y, f.z) as Shape;
@@ -893,6 +929,11 @@ function runFeatures(features: RF[], upTo?: string) {
         tools.set(f.id, { shape, op: op === "new" || !bodies.length ? "new" : op, target: tgt });
         if (isNew()) solidCount++;
         combine(bodies, f as never, shape, label);
+        // los muelles tienen superficies retorcidas: se dibujan con menos detalle
+        if (coarseIds.has(f.id)) {
+          const tgt = op === "new" || bodies.length === 1 ? bodies.findIndex((b) => b.id === f.id) : (f as { target?: string }).target ? bodies.findIndex((b) => b.id === (f as { target?: string }).target) : bodies.length - 1;
+          if (tgt >= 0) bodies[tgt] = { ...bodies[tgt], coarse: true };
+        }
       }
     } catch (e) {
       errors[f.id] = msg(e);
