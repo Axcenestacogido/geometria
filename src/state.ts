@@ -62,11 +62,13 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   sweep: "Barrido",
   loft: "Transición",
   import: "Importado",
+  layflat: "Apoyar para imprimir",
+  component: "Pieza",
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", fillet: "◜", chamfer: "◸",
-  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩",
+  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", layflat: "⤓", component: "❖",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -108,7 +110,7 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, thickness: "2", faces: [] };
     case "pattern": {
       // por defecto, repetir el último paso que crea o quita volumen
-      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "text", "sweep", "loft", "import"].includes(f.type));
+      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "text", "sweep", "loft", "import", "component"].includes(f.type));
       return {
         id, name, type, kind: "linear", source: src?.id ?? "",
         axis: "x", count: "3", spacing: "10", axis2: "y", count2: "1", spacing2: "10",
@@ -129,6 +131,10 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, sketches: doc.features.filter((f) => f.type === "sketch").slice(-2).map((f) => f.id), ruled: false, op };
     case "import":
       return { id, name, type, file: "", fileName: "", format: "step", x: "0", y: "0", z: "0", scale: "1", op };
+    case "layflat":
+      return { id, name, type, face: null };
+    case "component":
+      return { id, name, type, sourceId: "", source: { name: "", variables: [], features: [] }, params: {}, x: "0", y: "0", z: "0", rz: "0", op };
   }
 }
 
@@ -150,6 +156,8 @@ const NUM_FIELDS: Record<string, string[]> = {
   sweep: [],
   loft: [],
   import: ["x", "y", "z", "scale"],
+  layflat: [],
+  component: ["x", "y", "z", "rz"],
   rect: ["x", "y", "w", "h", "r"],
   circle: ["cx", "cy", "r"],
   ngon: ["cx", "cy", "r", "n"],
@@ -163,7 +171,7 @@ export interface ResolveOut {
   varErrors: Record<string, string>;
 }
 
-export function resolveDoc(doc: Doc): ResolveOut {
+export function resolveDoc(doc: Doc, depth = 0): ResolveOut {
   const { vars, errors: varErrors } = resolveVariables(doc.variables);
   const fieldErrors: Record<string, string> = {};
   const ev = (e: Expr | undefined, key: string, def = 0) => {
@@ -191,10 +199,24 @@ export function resolveDoc(doc: Doc): ResolveOut {
   const features = doc.features.map((f) => {
     const out: Record<string, unknown> = { ...f };
     if (f.type === "sketch") {
-      out.plane = { ...f.plane, offset: ev(f.plane.offset, `${f.id}:offset`) };
+      out.plane = { ...f.plane, offset: ev(f.plane.offset, `${f.id}:offset`), tilt: ev(f.plane.tilt, `${f.id}:tilt`), turn: ev(f.plane.turn, `${f.id}:turn`) };
       out.profiles = f.profiles.map((p) => resolveProfile(f.id, p));
     } else {
       for (const k of NUM_FIELDS[f.type]) out[k] = ev((f as never)[k], `${f.id}:${k}`);
+      if (f.type === "component") {
+        // las variables de la pieza: las suyas, o el valor nuevo calculado con las variables de esta
+        if (depth > 3) { fieldErrors[f.id] = "demasiadas piezas una dentro de otra"; out.resolved = []; return out as Resolved<Feature>; }
+        const variables = f.source.variables.map((v) => {
+          const e = f.params[v.name];
+          if (e === undefined || e.trim() === "") return v;
+          return { name: v.name, value: String(ev(e, `${f.id}:p:${v.name}`, 0)) as Expr };
+        });
+        const sub = resolveDoc({ version: 1, name: f.source.name, variables, features: f.source.features as Feature[] }, depth + 1);
+        const nErr = Object.keys(sub.fieldErrors).length + Object.keys(sub.varErrors).length;
+        if (nErr) fieldErrors[f.id] = `la pieza «${f.source.name}» tiene ${nErr} medida${nErr > 1 ? "s" : ""} que no se entiende${nErr > 1 ? "n" : ""}`;
+        out.resolved = sub.features;
+      }
+      if (f.type === "fillet" || f.type === "chamfer") out.sizes = (f.sizes ?? []).map((e, i) => ev(e, `${f.id}:size${i}`, 0));
       if (f.type === "hole" || f.type === "rod" || f.type === "text") {
         out.points = f.points.map((pt, i) => ({
           x: ev(pt.x, `${f.id}:${i}:x`), y: ev(pt.y, `${f.id}:${i}:y`), z: ev(pt.z, `${f.id}:${i}:z`), n: pt.n,

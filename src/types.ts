@@ -7,9 +7,10 @@ export type Vec3 = [number, number, number];
 
 export type StdPlane = "XY" | "XZ" | "YZ";
 
+/** tilt = inclinación alrededor del eje X del plano; turn = giro alrededor de su normal (grados) */
 export type PlaneDef =
-  | { kind: "std"; name: StdPlane; offset: Expr }
-  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: Expr };
+  | { kind: "std"; name: StdPlane; offset: Expr; tilt?: Expr; turn?: Expr }
+  | { kind: "face"; origin: Vec3; normal: Vec3; xDir: Vec3; offset: Expr; tilt?: Expr; turn?: Expr };
 
 export interface PolyPoint {
   x: Expr;
@@ -103,6 +104,10 @@ export interface EdgeFeature extends FeatureBase {
   size: Expr;
   /** Un punto sobre cada arista elegida (así sobrevive a cambios de medida) */
   edges: Vec3[];
+  /** Medida propia de cada arista (mismo orden que `edges`); vacío = la general */
+  sizes?: Expr[];
+  /** Un punto sobre cada cara elegida: se redondean todas sus aristas */
+  faces?: Vec3[];
 }
 
 /** Vaciado: deja paredes de `thickness` y quita las caras elegidas */
@@ -210,6 +215,28 @@ export interface ImportFeature extends SolidOpBase {
   scale: Expr;
 }
 
+/** Apoyar la pieza sobre una cara para imprimir (gira todos los cuerpos y los baja a Z = 0) */
+export interface LayFlatFeature extends FeatureBase {
+  type: "layflat";
+  /** un punto sobre la cara que va abajo; vacío = la cara plana más grande */
+  face: Vec3 | null;
+}
+
+/** Una pieza guardada metida dentro de esta (copia), con sus variables cambiables */
+export interface ComponentFeature extends SolidOpBase {
+  type: "component";
+  /** de qué pieza guardada salió (para «actualizar») */
+  sourceId: string;
+  source: { name: string; variables: Variable[]; features: unknown[] };
+  /** valor nuevo para algunas variables de la pieza (vacío = el suyo) */
+  params: Record<string, Expr>;
+  x: Expr; y: Expr; z: Expr;
+  /** giro alrededor de Z (grados) */
+  rz: Expr;
+  /** lo rellena resolveDoc: los pasos de la pieza ya con números */
+  resolved?: unknown[];
+}
+
 export type Feature =
   | SketchFeature
   | ExtrudeFeature
@@ -225,7 +252,9 @@ export type Feature =
   | TextFeature
   | SweepFeature
   | LoftFeature
-  | ImportFeature;
+  | ImportFeature
+  | LayFlatFeature
+  | ComponentFeature;
 
 export interface Variable {
   name: string;
