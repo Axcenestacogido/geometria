@@ -1,6 +1,10 @@
 import "./style.css";
-import type { Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved } from "./types";
-import { Viewport } from "./viewport";
+import type {
+  Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
+  PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
+} from "./types";
+import { Viewport, type ViewName } from "./viewport";
+import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
 import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
@@ -74,10 +78,18 @@ $("#app").innerHTML = `
   </aside>
   <section class="view" id="view">
     <div class="viewbar">
-      <button class="btn small" data-v="iso">3D</button>
+      <button class="btn small" id="measure" title="Medir distancias entre dos puntos">📏 Medir</button>
+      <span class="sep"></span>
+      <button class="btn small" data-v="iso" title="Vista 3D">3D</button>
+      <button class="btn small" id="persp" title="Cambia la vista 3D entre perspectiva e isométrica (paralela)">Perspectiva</button>
+      <span class="sep"></span>
       <button class="btn small" data-v="top">Arriba</button>
+      <button class="btn small" data-v="bottom">Abajo</button>
       <button class="btn small" data-v="front">Frente</button>
+      <button class="btn small" data-v="back">Detrás</button>
+      <button class="btn small" data-v="left">Izquierda</button>
       <button class="btn small" data-v="right">Derecha</button>
+      <span class="sep"></span>
       <button class="btn small" data-v="fit">Encajar</button>
     </div>
     <div class="banner" id="banner" hidden></div>
@@ -127,6 +139,7 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
       if (!$("#props").contains(document.activeElement)) renderProps();
     }
     viewport.setBodies(m.bodies);
+    renderPieceInfo();
     $("#buildtime").textContent = `${m.ms} ms`;
     renderTree();
     renderMarks();
@@ -142,6 +155,10 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   }
 };
 
+/** Pasos que, mientras los editas, muestran la pieza como estaba antes de ellos */
+const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod"]);
+const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod"]);
+
 let rebuildTimer = 0;
 function rebuild() {
   clearTimeout(rebuildTimer);
@@ -151,7 +168,7 @@ function rebuild() {
     if (!engineReady) return;
     const f = doc.features.find((x) => x.id === active);
     // al editar un boceto o un redondeo se ve la pieza como estaba antes de ese paso
-    const upTo = f && (f.type === "fillet" || f.type === "chamfer" || f.type === "sketch") ? f.id : undefined;
+    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : undefined;
     worker.postMessage({ kind: "build", seq: ++seq, features: resolved.features, upTo });
   }, 90);
 }
@@ -207,8 +224,9 @@ function renderUndo() {
 const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
+  { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
 ];
-const ADD_LABEL: Partial<Record<Feature["type"], string>> = { extrude: "Extruir", revolve: "Revolución" };
+const ADD_LABEL: Partial<Record<Feature["type"], string>> = { extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla" };
 
 function renderTools() {
   const box = $("#tools");
@@ -217,7 +235,7 @@ function renderTools() {
   const hasBody = !!build?.bodies.length;
   for (const t of ADD) {
     const needSketch = t.type === "extrude" || t.type === "revolve";
-    const needBody = t.type === "fillet" || t.type === "chamfer";
+    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod"].includes(t.type);
     box.append(h("button", {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
@@ -246,7 +264,8 @@ function setActive(id: string | null) {
     $("#sketch").classList.remove("on");
     sketcher.close();
   }
-  viewport.pickMode = f?.type === "fillet" || f?.type === "chamfer" ? "edge" : "none";
+  if (measuring) stopMeasure();
+  viewport.pickMode = f?.type === "fillet" || f?.type === "chamfer" ? "edge" : f && FACE_PICK_TYPES.has(f.type) ? "face" : "none";
   renderTree();
   renderProps();
   renderBanner();
@@ -407,11 +426,45 @@ function opFields(f: Extract<Feature, { op: string }>) {
   return els;
 }
 
+const fmtEs = (n: number, d = 1) => n.toLocaleString("es-ES", { maximumFractionDigits: d, minimumFractionDigits: d });
+
+/** Volumen, tamaño, peso y filamento de la pieza (se ve cuando no hay ningún paso elegido) */
+function renderPieceInfo() {
+  const box = document.getElementById("piece-info");
+  if (!box) return;
+  box.innerHTML = "";
+  box.append(h("h3", {}, "Tu pieza"));
+  const bodies = build?.bodies ?? [];
+  if (!bodies.length) { box.append(h("div", { class: "empty" }, "Todavía no hay ningún sólido.")); return; }
+  let vol = 0, area = 0;
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (const b of bodies) {
+    vol += b.volume || 0; area += b.area || 0;
+    const v = b.vertices;
+    for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], v[i + k]); mx[k] = Math.max(mx[k], v[i + k]); }
+  }
+  const cm3 = vol / 1000;
+  const row = (label: string, value: string) => h("div", { class: "info-row" }, h("span", {}, label), h("b", {}, value));
+  box.append(
+    row("Tamaño", `${fmtEs(mx[0] - mn[0])} × ${fmtEs(mx[1] - mn[1])} × ${fmtEs(mx[2] - mn[2])} mm`),
+    row("Volumen", `${fmtEs(cm3, 2)} cm³`),
+    row("Superficie", `${fmtEs(area / 100, 1)} cm²`),
+    row("Peso en PLA", `${fmtEs(cm3 * 1.24)} g`),
+    row("Peso en PETG", `${fmtEs(cm3 * 1.27)} g`),
+    // filamento de 1,75 mm: sección de 2,405 mm²
+    row("Filamento 1,75 mm", `${fmtEs(vol / 2.405 / 1000, 2)} m`),
+    h("div", { class: "empty" }, "Calculado como si se imprimiera maciza (100 % de relleno). Con el relleno normal de tu laminador gastará bastante menos."),
+  );
+  if (bodies.length > 1) box.append(h("div", { class: "empty" }, `Suma de ${bodies.length} cuerpos.`));
+}
+
 function renderProps() {
   const box = $("#props");
   box.innerHTML = "";
   const f = doc.features.find((x) => x.id === active);
   if (!f) {
+    box.append(h("div", { class: "section", id: "piece-info" }));
+    renderPieceInfo();
     box.append(h("div", { class: "section" },
       h("h3", {}, "Cómo se usa"),
       h("div", { class: "msg info" }, "1. Haz un ", h("b", {}, "Boceto"), " (dibujo 2D con medidas)."),
@@ -474,10 +527,95 @@ function renderProps() {
       sec.append(h("div", { class: "empty mt" }, "Mientras editas este paso ves la pieza como estaba antes de él. Pulsa «Hecho» para ver el resultado."));
       break;
     }
+    case "shell": {
+      sec.append(exprField("Grosor pared", () => f.thickness, (v) => (f.thickness = v), k("thickness")));
+      sec.append(h("div", { class: "msg info" }, `Haz clic en la cara (o caras) que quedan abiertas; otro clic la quita. Elegidas: ${f.faces.length}.`));
+      if (f.faces.length) sec.append(h("button", { class: "btn small", onclick: () => { f.faces = []; changed(true, true); } }, "Quitar todas"));
+      sec.append(h("div", { class: "empty mt" }, "Las paredes crecen hacia dentro, así que la medida de fuera no cambia."));
+      break;
+    }
+    case "pattern": renderPatternProps(sec, f); break;
+    case "hole":
+    case "rod": renderHoleProps(sec, f); break;
   }
   sec.append(h("div", { class: "actions" },
     h("button", { class: "btn primary", onclick: () => setActive(null) }, "Hecho"),
   ));
+}
+
+function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  const idx = doc.features.indexOf(f);
+  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "pattern"].includes(x.type));
+  sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
+  sec.append(selectField("Repetir", f.source, [["", "El cuerpo entero"], ...sources.map((s) => [s.id, s.name] as [string, string])], (v) => (f.source = v)));
+  const axes: [string, string][] = [["x", "X (rojo)"], ["y", "Y (verde)"], ["z", "Z (azul)"]];
+  if (f.kind === "linear") {
+    sec.append(selectField("Dirección", f.axis, axes, (v) => (f.axis = v as Axis)));
+    sec.append(exprField("Cantidad", () => f.count, (v) => (f.count = v), k("count"), { unit: " en total" }));
+    sec.append(exprField("Separación", () => f.spacing, (v) => (f.spacing = v), k("spacing"), { hint: "negativa = hacia el otro lado" }));
+    sec.append(h("h3", { class: "mt" }, "Segunda dirección (rejilla)"));
+    sec.append(selectField("Dirección 2", f.axis2, axes, (v) => (f.axis2 = v as Axis)));
+    sec.append(exprField("Cantidad 2", () => f.count2, (v) => (f.count2 = v), k("count2"), { unit: " (1 = sin rejilla)" }));
+    sec.append(exprField("Separación 2", () => f.spacing2, (v) => (f.spacing2 = v), k("spacing2")));
+  } else if (f.kind === "circular") {
+    sec.append(selectField("Eje de giro", f.axis, axes, (v) => (f.axis = v as Axis)));
+    sec.append(exprField("Cantidad", () => f.count, (v) => (f.count = v), k("count"), { unit: " en total" }));
+    sec.append(exprField("Ángulo total", () => f.angle, (v) => (f.angle = v), k("angle"), { unit: "°", hint: "360 = vuelta completa" }));
+    sec.append(h("h3", { class: "mt" }, "Centro del giro"));
+    sec.append(exprField("X", () => f.cx, (v) => (f.cx = v), k("cx")));
+    sec.append(exprField("Y", () => f.cy, (v) => (f.cy = v), k("cy")));
+    sec.append(exprField("Z", () => f.cz, (v) => (f.cz = v), k("cz")));
+  } else {
+    sec.append(selectField("Espejo", f.axis, [["x", "Plano YZ (refleja en X)"], ["y", "Plano XZ (refleja en Y)"], ["z", "Plano XY (refleja en Z)"]], (v) => (f.axis = v as Axis)));
+    sec.append(exprField("Posición", () => f.offset, (v) => (f.offset = v), k("offset"), { hint: "dónde está el espejo en ese eje" }));
+  }
+  sec.append(h("div", { class: "empty mt" }, f.source
+    ? "Las copias hacen lo mismo que el original: si era un agujero, restan; si sumaba, suman."
+    : "Copia el último cuerpo entero y lo une con las copias."));
+}
+
+function renderHoleProps(sec: HTMLElement, f: HoleFeature | RodFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  sec.append(selectField("Métrica", f.size, SCREW_NAMES.map((n) => [n, n] as [string, string]), (v) => (f.size = v)));
+  const sc = SCREWS[f.size];
+  if (f.type === "hole") {
+    sec.append(selectField("Tipo", f.kind, Object.entries(HOLE_KIND_LABEL) as [string, string][], (v) => (f.kind = v as HoleKind)));
+    sec.append(checkField("Pasante (atraviesa toda la pieza)", f.through, (v) => (f.through = v)));
+    if (!f.through) sec.append(exprField("Profundidad", () => f.depth, (v) => (f.depth = v), k("depth")));
+    if (f.kind !== "insert") sec.append(exprField("Holgura", () => f.fit, (v) => (f.fit = v), k("fit"), { hint: "se suma al diámetro; 0,2 va bien en la Bambu" }));
+    if (sc) {
+      const fit = Number(f.fit.replace(",", ".")) || 0;
+      const info: Record<HoleKind, string> = {
+        clearance: `Agujero de ${fmt(sc.clearance + fit)} mm.`,
+        pilot: `Agujero de ${fmt(sc.pilot + fit)} mm: el tornillo abre su propia rosca en el plástico.`,
+        insert: `Agujero de ${fmt(sc.insert)} mm. Profundidad recomendada: ${fmt(sc.insertDepth + 1)} mm.`,
+        counterbore: `Paso de ${fmt(sc.clearance + fit)} mm y caja de ${fmt(sc.headCb + 0.6 + fit)} × ${fmt(sc.headCbH + 0.3)} mm.`,
+        countersink: `Paso de ${fmt(sc.clearance + fit)} mm y avellanado a 90° de ${fmt(sc.headCs + fit)} mm.`,
+        nut: `Hexágono de ${fmt(sc.nutAf + fit)} mm entre caras y ${fmt(sc.nutH + 0.3)} mm de alto, más agujero de paso.`,
+        thread: `Rosca ${f.size}×${sc.pitch}. Imprimirla bien pide M6 o más grande; por debajo, mejor inserto o atornillar directo.`,
+      };
+      sec.append(h("div", { class: "msg info" }, info[f.kind]));
+    }
+  } else {
+    sec.append(exprField("Largo", () => f.length, (v) => (f.length = v), k("length")));
+    sec.append(exprField("Holgura", () => f.fit, (v) => (f.fit = v), k("fit"), { hint: "se resta al diámetro" }));
+    if (sc) sec.append(h("div", { class: "msg info" }, `Rosca ${f.size}×${sc.pitch}. Para que la tuerca entre bien, M6 o más grande.`));
+  }
+  const before = build?.bodiesBefore[f.id] ?? [];
+  if (before.length > 1) sec.append(selectField("Sobre", f.target ?? "", [["", "El último cuerpo"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => (f.target = v || undefined)));
+
+  sec.append(h("h3", { class: "mt" }, `Posiciones (${f.points.length})`));
+  if (!f.points.length) sec.append(h("div", { class: "msg info" }, "Haz clic en una cara plana de la pieza para colocar cada uno. Luego puedes ajustar la posición exacta aquí."));
+  f.points.forEach((pt, i) => {
+    sec.append(h("div", { class: "field" }, h("label", {}, `${i + 1}  (X Y Z)`),
+      h("div", { class: "row-pt3" },
+        exprInline(() => pt.x, (v) => (pt.x = v)),
+        exprInline(() => pt.y, (v) => (pt.y = v)),
+        exprInline(() => pt.z, (v) => (pt.z = v)),
+        h("button", { class: "btn small", title: "Quitar", onclick: () => { f.points.splice(i, 1); changed(true, true); } }, "✕"),
+      )));
+  });
 }
 
 /** Solo actualiza el aviso del paso activo (sin rehacer el panel, para no perder lo que escribes) */
@@ -608,8 +746,26 @@ function startFacePick() {
 }
 
 viewport.events.onFacePick = (point, normal) => {
-  if (!pickingFace) return;
   const f = doc.features.find((x) => x.id === active);
+  if (f?.type === "shell") {
+    // otro clic cerca de un punto ya elegido lo quita
+    const near = f.faces.findIndex((q) => Math.hypot(q[0] - point[0], q[1] - point[1], q[2] - point[2]) < 3);
+    if (near >= 0) f.faces.splice(near, 1);
+    else f.faces.push(point.map((c) => Math.round(c * 1000) / 1000) as Vec3);
+    changed(true, true);
+    return;
+  }
+  if (f?.type === "hole" || f?.type === "rod") {
+    const n = normal.map((c) => Math.round(c * 1e6) / 1e6) as Vec3;
+    // redondeo a 0,5 mm y vuelta al plano de la cara, para que las medidas salgan limpias
+    let q = point.map((c) => Math.round(c * 2) / 2) as Vec3;
+    const d = (point[0] - q[0]) * n[0] + (point[1] - q[1]) * n[1] + (point[2] - q[2]) * n[2];
+    q = [q[0] + n[0] * d, q[1] + n[1] * d, q[2] + n[2] * d].map((c) => Math.round(c * 1000) / 1000) as Vec3;
+    f.points.push({ x: fmt(q[0]), y: fmt(q[1]), z: fmt(q[2]), n });
+    changed(true, true);
+    return;
+  }
+  if (!pickingFace) return;
   if (f?.type !== "sketch") return;
   const pl = planeFromHit(point, normal);
   f.plane = { kind: "face", ...pl, offset: "0" };
@@ -641,9 +797,27 @@ function renderBanner() {
     b.hidden = false;
     b.innerHTML = "";
     b.append("Haz clic en una cara plana de la pieza", h("button", { class: "btn small", onclick: () => { pickingFace = false; viewport.pickMode = "none"; $("#sketch").classList.add("on"); renderBanner(); } }, "Cancelar"));
+  } else if (measuring) {
+    b.hidden = false;
+    b.innerHTML = "";
+    const pts = viewport.measurePts;
+    let txt = "Medir: haz clic en dos puntos (vértices, aristas o caras)";
+    if (pts.length === 1) txt = "Ahora el segundo punto";
+    if (pts.length === 2) {
+      const [a, c] = pts;
+      const dx = c[0] - a[0], dy = c[1] - a[1], dz = c[2] - a[2];
+      txt = `Distancia ${fmt(Math.hypot(dx, dy, dz))} mm  ·  X ${fmt(Math.abs(dx))}  Y ${fmt(Math.abs(dy))}  Z ${fmt(Math.abs(dz))}`;
+    }
+    b.append(txt, h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
   } else if (f && (f.type === "fillet" || f.type === "chamfer")) {
     b.hidden = false;
     b.textContent = `${f.name}: elige aristas con un clic`;
+  } else if (f?.type === "shell") {
+    b.hidden = false;
+    b.textContent = `${f.name}: clic en la cara que queda abierta`;
+  } else if (f?.type === "hole" || f?.type === "rod") {
+    b.hidden = false;
+    b.textContent = `${f.name}: clic en una cara para colocar cada uno`;
   } else b.hidden = true;
 }
 
@@ -654,7 +828,15 @@ function renderMarks() {
     const rf = resolved.features.find((x) => x.id === f.id) as Resolved<SketchFeature> | undefined;
     if (rf) plane = planeBasis(rf.plane as never);
   }
-  viewport.setMarks(f && (f.type === "fillet" || f.type === "chamfer") ? f.edges : [], pickingFace ? null : plane);
+  const pins = f && (f.type === "hole" || f.type === "rod")
+    ? ((resolved.features.find((x) => x.id === f.id) as Resolved<HoleFeature> | undefined)?.points ?? []).map((p) => ({ p: [p.x, p.y, p.z] as Vec3, n: p.n as Vec3 }))
+    : [];
+  viewport.setMarks({
+    edges: f && (f.type === "fillet" || f.type === "chamfer") ? f.edges : [],
+    faces: f?.type === "shell" ? f.faces : [],
+    pins,
+    plane: pickingFace ? null : plane,
+  });
 }
 
 /** Dibuja en 3D los bocetos que aún no se han usado (y el activo) */
@@ -720,7 +902,7 @@ function openDialog() {
       m.id === docId ? h("small", {}, "(abierta)") : h("button", { class: "btn small", onclick: () => { if (confirm(`¿Borrar «${m.name}»?`)) { storage.remove(m.id); openDialog(); } } }, "Borrar"),
     ));
   }
-  dlg.append(box, h("div", { class: "right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  dlg.append(box, h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
   if (!dlg.open) dlg.showModal();
 }
 
@@ -760,7 +942,41 @@ for (const m of document.querySelectorAll<HTMLElement>(".menu")) {
 document.addEventListener("click", () => document.querySelectorAll(".menu").forEach((x) => x.classList.remove("open")));
 $("#m-file").querySelectorAll<HTMLElement>("[data-a]").forEach((b) => b.addEventListener("click", () => fileAction(b.dataset.a!)));
 $("#m-export").querySelectorAll<HTMLElement>("[data-f]").forEach((b) => b.addEventListener("click", () => doExport(b.dataset.f as never)));
-document.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.addEventListener("click", () => (b.dataset.v === "fit" ? viewport.fit() : viewport.view(b.dataset.v as never))));
+document.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.addEventListener("click", () => (b.dataset.v === "fit" ? viewport.fit() : viewport.view(b.dataset.v as ViewName))));
+
+// perspectiva / isométrica (se recuerda en este navegador)
+const PERSP_KEY = "geometria:perspectiva";
+try { viewport.perspective3d = localStorage.getItem(PERSP_KEY) !== "no"; } catch { /* sin almacenamiento */ }
+function renderPerspBtn() {
+  $("#persp").textContent = viewport.perspective3d ? "Perspectiva" : "Isométrica";
+}
+$("#persp").addEventListener("click", () => {
+  viewport.setPerspective3d(!viewport.perspective3d);
+  try { localStorage.setItem(PERSP_KEY, viewport.perspective3d ? "si" : "no"); } catch { /* nada */ }
+  renderPerspBtn();
+});
+renderPerspBtn();
+if (!viewport.perspective3d) viewport.view("iso");
+
+// medir
+let measuring = false;
+function startMeasure() {
+  if (active) setActive(null);
+  measuring = true;
+  viewport.clearMeasure();
+  viewport.pickMode = "measure";
+  $("#measure").classList.add("on");
+  renderBanner();
+}
+function stopMeasure() {
+  measuring = false;
+  viewport.clearMeasure();
+  if (viewport.pickMode === "measure") viewport.pickMode = "none";
+  $("#measure").classList.remove("on");
+  renderBanner();
+}
+$("#measure").addEventListener("click", () => (measuring ? stopMeasure() : startMeasure()));
+viewport.events.onMeasure = () => renderBanner();
 $("#undo").addEventListener("click", () => undoRedo("undo"));
 $("#redo").addEventListener("click", () => undoRedo("redo"));
 $("#addvar").addEventListener("click", () => {
@@ -791,6 +1007,7 @@ document.addEventListener("keydown", (e) => {
     if (t && !mod) { sketcher.setTool(t); renderSketchBar(); }
     return;
   }
+  if (e.key === "Escape" && measuring) { stopMeasure(); return; }
   if (e.key === "Escape" && active) setActive(null);
 });
 

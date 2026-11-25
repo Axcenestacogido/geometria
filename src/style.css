@@ -109,7 +109,10 @@ button, input, select { font: inherit; color: inherit; }
 .actions { margin-top: 12px; display: flex; gap: 6px; }
 .subsection { padding: 10px 0 0; }
 .row-pt { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; }
-.right { text-align: right; }
+.t-right { text-align: right; }
+.row-pt3 { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 4px; }
+.viewbar .sep { width: 6px; }
+.viewbar { flex-wrap: wrap; justify-content: flex-end; left: 10px; }
 .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 .check { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 13px; }
 .msg { padding: 8px 10px; border-radius: 6px; font-size: 13px; margin: 6px 0; }
@@ -179,3 +182,6 @@ kbd { font: 11px ui-monospace, monospace; background: var(--panel-2); border: 1p
   .side.right { border-left: 0; max-height: none; }
   .view { order: -1; }
 }
+
+.info-row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.info-row b { font-variant-numeric: tabular-nums; }
