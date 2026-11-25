@@ -1,4 +1,6 @@
 import type { Doc, Feature, Expr, Resolved, Profile, PlaneDef } from "./types";
+import { hasLabel, fillLabel, currentLabel } from "./label";
+export { hasLabel, fillLabel, currentLabel, bumpLabel, shortDate, docHasLabel } from "./label";
 import { evaluate, resolveVariables } from "./expr";
 import { planeBasis, uid } from "./geom";
 
@@ -275,6 +277,7 @@ export function resolveDoc(doc: Doc, depth = 0): ResolveOut {
         out.resolved = sub.features;
       }
       if (f.type === "fillet" || f.type === "chamfer") out.sizes = (f.sizes ?? []).map((e, i) => ev(e, `${f.id}:size${i}`, 0));
+      if (f.type === "text" && hasLabel(f.text)) out.text = fillLabel(f.text, currentLabel(doc));
       if (f.type === "hole" || f.type === "rod" || f.type === "text") {
         out.points = f.points.map((pt, i) => ({
           x: ev(pt.x, `${f.id}:${i}:x`), y: ev(pt.y, `${f.id}:${i}:y`), z: ev(pt.z, `${f.id}:${i}:z`), n: pt.n,

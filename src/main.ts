@@ -26,6 +26,7 @@ import { cloud, docFileIds, type CloudStatus } from "./cloud";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
   FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, myFit, setMyFit, type ResolveOut,
+  bumpLabel, fillLabel, currentLabel, hasLabel,
 } from "./state";
 
 // ======================================================================
@@ -1695,6 +1696,16 @@ function renderTextProps(sec: HTMLElement, f: TextFeature) {
   ta.addEventListener("input", () => { f.text = ta.value; changed(false); });
   ta.addEventListener("change", () => changed(true));
   sec.append(h("div", { class: "field" }, h("label", {}, "Texto"), ta));
+  if (hasLabel(f.text)) {
+    const lab = currentLabel(doc);
+    sec.append(h("div", { class: "msg info" },
+      "Etiqueta de versión: ahora pone ", h("b", {}, fillLabel(f.text, lab)), ". ",
+      "Cada vez que exportes en 3MF o STL para imprimir, el número sube solo y coge la fecha de ese día. ",
+      "Huecos: {v} = v3, {n} = 3, {fecha} = 25-nov.",
+      doc.label ? h("button", { class: "btn small", onclick: () => { delete doc.label; changed(true, true); } }, "Volver a v1") : null));
+  } else {
+    sec.append(h("button", { class: "btn small", title: "Graba «v1 · 25-nov» y sube solo al exportar para imprimir", onclick: () => { f.text = "{v} · {fecha}"; changed(true, true); } }, "🏷 Usar como etiqueta de versión"));
+  }
   const fonts: [TextFont, string][] = [["sans-bold", "Inter negrita (recomendada)"], ["sans", "Inter normal"], ["mono", "JetBrains Mono (letras del mismo ancho)"]];
   sec.append(selectField("Letra", f.font, fonts, (v) => (f.font = v as TextFont)));
   sec.append(exprField("Alto de letra", () => f.size, (v) => (f.size = v), k("size")));
@@ -2512,6 +2523,7 @@ function bodyMenu(id: string | null, x: number, y: number, face: { point: Vec3; 
       item("⟳ Girar", "R", () => pick("rotate")),
       item("⧉ Hacer una copia", "Ctrl D", () => { pick("translate"); ($("#selpanel").querySelector("[data-copy]") as HTMLButtonElement | null)?.click(); }),
       face ? item("⇕ Empujar esta cara", "", () => pushFace(face)) : null,
+      face ? item("🏷 Grabar etiqueta de versión aquí", "", () => labelFace(b.id, face)) : null,
       colorRow,
       h("hr"),
       item("◌ Ocultar", "V", () => hideBody(b.id)),
@@ -2548,6 +2560,20 @@ function pushFace(face: { point: Vec3; normal: Vec3 }) {
   doc.features.push(f);
   setActive(f.id);
   changed(true, true);
+}
+
+/** Texto «v1 · 25-nov» grabado en la cara: sube solo cada vez que exportas para imprimir */
+function labelFace(bodyId: string, face: { point: Vec3; normal: Vec3 }) {
+  const f = newFeature(doc, "text") as TextFeature;
+  f.name = "Etiqueta de versión";
+  f.text = "{v} · {fecha}";
+  f.size = "5"; f.depth = "0.6"; f.op = "cut";
+  if ((build?.bodies.length ?? 0) > 1) f.target = bodyId;
+  selBody = null;
+  doc.features.push(f);
+  setActive(f.id);
+  viewport.events.onFacePick?.(face.point, face.normal);
+  toast("Etiqueta puesta. Al exportar en 3MF o STL pasará a la versión siguiente con la fecha del día.");
 }
 
 viewport.events.onBodyClick = (id) => {
@@ -2780,7 +2806,10 @@ const safeName = () => (doc.name || "pieza").replace(/[^\wáéíóúñÁÉÍÓÚ
 function doExport(format: "stl" | "step" | "3mf") {
   if (!engineReady) return toast("El motor aún está cargando");
   const s = ++seq;
-  toast("Preparando el archivo…");
+  // para imprimir (3MF/STL): la etiqueta de versión sube sola (v3 → v4) y coge la fecha de hoy
+  const lab = format !== "step" ? bumpLabel(doc) : null;
+  if (lab) changed(true);
+  toast(lab ? `Preparando el archivo… La etiqueta grabada será «${fillLabel("{v} · {fecha}", lab)}»` : "Preparando el archivo…");
   exportWaiters.set(s, (m) => {
     if (!m.data) return toast("No se pudo exportar: " + (m.error ?? ""));
     const mime = { stl: "model/stl", step: "model/step", "3mf": "model/3mf" }[format];

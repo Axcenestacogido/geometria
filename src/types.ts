@@ -450,6 +450,8 @@ export interface Doc {
   family?: Family;
   /** carpetas de la lista de pasos que están plegadas */
   folded?: string[];
+  /** Etiqueta de versión: la última vez que se exportó para imprimir (número y fecha «25-nov») */
+  label?: { n: number; date: string };
 }
 
 /** Tabla de tamaños: qué variables cambian y sus valores en cada fila */
