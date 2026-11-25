@@ -16,6 +16,8 @@ export interface ViewportEvents {
   onMeasure?: (points: Vec3[]) => void;
   /** clic sin herramienta: el cuerpo que hay debajo (o null si es el vacío) */
   onBodyClick?: (id: string | null) => void;
+  /** doble clic sobre una cara sin herramienta: para dibujar encima */
+  onFaceDouble?: (point: Vec3, normal: Vec3) => void;
 }
 
 /** Lo que se ha movido con las flechas: mm y grados (un solo eje de giro por arrastre) */
@@ -114,6 +116,11 @@ export class Viewport {
       if (moved < (this.touch ? 12 : 5) && e.button === 0) this.click(e);
     });
     el.addEventListener("pointermove", (e) => this.hover(e));
+    el.addEventListener("dblclick", (e) => {
+      if (this.pickMode !== "none" || this.explodeK > 0) return;
+      const f = this.pickFace(e as PointerEvent);
+      if (f) this.events.onFaceDouble?.([f.point.x, f.point.y, f.point.z], [f.normal.x, f.normal.y, f.normal.z]);
+    });
 
     const loop = () => {
       this.anim?.(performance.now());

@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, RefPlaneFeature, TransformFeature, PlaneDef, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
+  TextFeature, TextFont, SweepFeature, ExtrudeFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, RefPlaneFeature, TransformFeature, PlaneDef, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -75,17 +75,23 @@ $("#app").innerHTML = `
   <button class="btn" id="redo" title="Rehacer (Ctrl+Y)">↷</button>
   <div class="spacer"></div>
   <div class="menu" id="m-file"><button class="btn">Archivo ▾</button><div class="menu-list">
-    <button data-a="new">Pieza nueva</button>
-    <button data-a="open">Mis piezas…<small>Galería con miniaturas</small></button>
-    <button data-a="version">Guardar versión…<small>Una foto de cómo está ahora, con nombre</small></button>
-    <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
-    <button data-a="example">Abrir el ejemplo</button>
-    <button data-a="family">Familia de tamaños…<small>La misma pieza en varias medidas; exportarlas todas</small></button>
-    <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
+    <div class="menu-h">Piezas</div>
+    <button data-a="new">Pieza nueva<kbd>N</kbd></button>
+    <button data-a="open">Mis piezas…<kbd>O</kbd><small>Galería con miniaturas</small></button>
     <button data-a="templates">Plantillas…<small>Caja, bisagra, engranajes, muelle, clip, tornillo</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
+    <div class="menu-h">Versiones</div>
+    <button data-a="version">Guardar versión…<kbd>Ctrl S</kbd><small>Una foto de cómo está ahora, con nombre</small></button>
+    <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
+    <div class="menu-h">Ajustes de la pieza</div>
+    <button data-a="family">Familia de tamaños…<small>La misma pieza en varias medidas; exportarlas todas</small></button>
+    <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
+    <div class="menu-h">Archivo</div>
     <button data-a="save-file">Descargar proyecto (.json)<small>Para guardarlo o pasarlo a otro equipo</small></button>
     <button data-a="load-file">Cargar proyecto (.json)…</button>
+    <div class="menu-h">Ayuda</div>
+    <button data-a="example">Abrir el ejemplo</button>
+    <button data-a="keys">Atajos de teclado<kbd>?</kbd></button>
   </div></div>
   <div class="menu" id="m-export"><button class="btn primary">Exportar ▾</button><div class="menu-list">
     <button data-f="3mf">3MF<small>Para Bambu Studio, Orca, Prusa (recomendado)</small></button>
@@ -371,14 +377,6 @@ function renderUndo() {
 // Panel izquierdo: añadir, pasos, variables
 // ======================================================================
 
-const ADD: { type: Feature["type"]; key?: string }[] = [
-  { type: "sketch" }, { type: "plane" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
-  { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
-  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" }, { type: "joint" }, { type: "catalog" }, { type: "split" },
-  { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
-  { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "relief" }, { type: "import" },
-  { type: "component" }, { type: "layflat" },
-];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
   component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve", plane: "Plano ref.",
@@ -401,22 +399,58 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   spring: "Muelle de compresión: diámetro, hilo, paso y vueltas",
 };
 
+/** Herramientas por grupos, en el orden en que se suelen usar */
+const TOOL_GROUPS: { name: string; types: Feature["type"][] }[] = [
+  { name: "Dibujar", types: ["sketch", "plane"] },
+  { name: "Crear", types: ["extrude", "revolve", "box", "cylinder", "sphere", "sweep", "loft", "text", "relief", "gear", "spring"] },
+  { name: "Modificar", types: ["fillet", "chamfer", "shell", "hole", "rod", "pattern", "transform", "combine", "split"] },
+  { name: "Montar e importar", types: ["joint", "catalog", "component", "import", "layflat"] },
+];
+/** atajos de teclado de las herramientas (se ven en su globo) */
+const TOOL_KEY: Partial<Record<Feature["type"], string>> = { sketch: "B", extrude: "E", fillet: "F", transform: "M", hole: "H", box: "C", text: "T" };
+const closedGroups = new Set<string>((() => { try { return JSON.parse(localStorage.getItem("geometria:grupos") ?? "[]") as string[]; } catch { return []; } })());
+
+/** Pulsa una herramienta de «Añadir» (desde el botón o con su atajo) */
+function useTool(type: Feature["type"]) {
+  if (type === "import") $("#file3d").click();
+  else if (type === "relief") { replacingRelief = null; $("#filerelief").click(); }
+  else if (type === "component") componentDialog();
+  else if (type === "sketch" || type === "plane") whereDialog(type);
+  else addFeature(type);
+}
+function toolDisabled(type: Feature["type"]) {
+  const hasSketch = doc.features.some((f) => f.type === "sketch");
+  const hasBody = !!build?.bodies.length;
+  const needSketch = type === "extrude" || type === "revolve" || type === "sweep" || type === "loft";
+  const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine", "joint", "split"].includes(type);
+  return needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : "";
+}
+
 function renderTools() {
   const box = $("#tools");
   box.innerHTML = "";
-  const hasSketch = doc.features.some((f) => f.type === "sketch");
-  const hasBody = !!build?.bodies.length;
-  for (const t of ADD) {
-    const needSketch = t.type === "extrude" || t.type === "revolve" || t.type === "sweep" || t.type === "loft";
-    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine", "joint", "split"].includes(t.type);
-    box.append(h("button", {
-      class: "tool",
-      disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
-      title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : ADD_TITLE[t.type] ?? "",
-      onclick: () => (t.type === "import" ? $("#file3d").click() : t.type === "relief" ? (replacingRelief = null, $("#filerelief").click()) : t.type === "component" ? componentDialog() : t.type === "sketch" || t.type === "plane" ? whereDialog(t.type) : addFeature(t.type)),
-    }, h("b", {}, FEATURE_ICON[t.type]), ADD_LABEL[t.type] ?? FEATURE_LABEL[t.type]));
+  for (const g of TOOL_GROUPS) {
+    const closed = closedGroups.has(g.name);
+    box.append(h("button", { class: `tool-h ${closed ? "closed" : ""}`, title: closed ? "Mostrar" : "Ocultar", onclick: () => {
+      if (closed) closedGroups.delete(g.name); else closedGroups.add(g.name);
+      try { localStorage.setItem("geometria:grupos", JSON.stringify([...closedGroups])); } catch { /* sin sitio: da igual */ }
+      renderTools();
+    } }, h("span", {}, closed ? "▸" : "▾"), g.name));
+    if (closed) continue;
+    const grid = h("div", { class: "tools-g" });
+    for (const type of g.types) {
+      const why = toolDisabled(type);
+      const key = TOOL_KEY[type];
+      grid.append(h("button", {
+        class: "tool", disabled: !!why,
+        title: why || `${ADD_TITLE[type] ?? FEATURE_LABEL[type]}${key ? ` · Atajo: ${key}` : ""}`,
+        onclick: () => useTool(type),
+      }, h("b", {}, FEATURE_ICON[type]), ADD_LABEL[type] ?? FEATURE_LABEL[type]));
+    }
+    box.append(grid);
   }
 }
+
 
 function addFeature(type: Feature["type"]) {
   const f = newFeature(doc, type);
@@ -432,6 +466,18 @@ function addFeature(type: Feature["type"]) {
     }
   }
   doc.features.push(f);
+  setActive(f.id);
+  changed(true, true);
+}
+
+/** Extruye un boceto ya hecho: si está sobre una cara de la pieza, resta (un hueco); si no, suma */
+function extrudeSketch(sketchId: string) {
+  const sk = doc.features.find((x) => x.id === sketchId);
+  if (sk?.type !== "sketch") return;
+  const f = newFeature(doc, "extrude") as ExtrudeFeature;
+  f.sketch = sketchId;
+  const i = doc.features.indexOf(sk);
+  doc.features.splice(i + 1, 0, f);
   setActive(f.id);
   changed(true, true);
 }
@@ -484,7 +530,12 @@ function renderTree() {
   const ul = $("#tree");
   ul.innerHTML = "";
   if (!doc.features.length) {
-    ul.append(h("li", { class: "empty" }, "Empieza con un boceto o una caja."));
+    ul.append(h("li", { class: "empty start" }, "Para empezar:",
+      h("div", { class: "seg-btns" },
+        h("button", { class: "btn small", onclick: () => useTool("sketch") }, "✎ Un boceto"),
+        h("button", { class: "btn small", onclick: () => useTool("box") }, "▣ Una caja"),
+        h("button", { class: "btn small", onclick: () => templatesDialog() }, "Una plantilla…"),
+        h("button", { class: "btn small", onclick: () => openDialog() }, "Mis piezas…"))));
     return;
   }
   doc.features.forEach((f, i) => {
@@ -514,11 +565,14 @@ function move(i: number, d: number) {
 }
 
 function removeFeature(id: string) {
-  const users = doc.features.filter((f) => sketchUses(f).includes(id));
-  if (users.length && !confirmInline(`Este boceto lo usa «${users.map((u) => u.name).join(", ")}». ¿Borrarlo igualmente?`)) return;
-  doc.features = doc.features.filter((f) => f.id !== id);
+  const f = doc.features.find((x) => x.id === id);
+  if (!f) return;
+  const users = doc.features.filter((x) => sketchUses(x).includes(id));
+  doc.features = doc.features.filter((x) => x.id !== id);
   if (active === id) setActive(null);
   changed(true, true);
+  // sin preguntar: se puede deshacer al momento
+  toast(users.length ? `Borrado «${f.name}» (lo usaba «${users[0].name}»)` : `Borrado «${f.name}»`, { label: "Deshacer", run: () => undoRedo("undo") });
 }
 
 /** Bocetos que usa un paso */
@@ -529,8 +583,17 @@ function sketchUses(f: Feature): string[] {
   return [];
 }
 
-// confirm() del navegador es suficiente aquí y se puede deshacer con Ctrl+Z
-const confirmInline = (q: string) => window.confirm(q);
+/** Botón que pide un segundo clic para confirmar (sin ventanas del navegador) */
+function twoClick(label: string, sure: string, run: () => void, cls = "btn small") {
+  const b = h("button", { class: cls }, label) as HTMLButtonElement;
+  let armed = 0;
+  b.addEventListener("click", () => {
+    if (armed) { clearTimeout(armed); armed = 0; run(); return; }
+    b.textContent = sure; b.classList.add("danger");
+    armed = window.setTimeout(() => { armed = 0; b.textContent = label; b.classList.remove("danger"); }, 3000);
+  });
+  return b;
+}
 
 function renderVars() {
   const box = $("#vars");
@@ -2012,6 +2075,13 @@ function renderSketchBar() {
   bar.append(snap, h("button", { class: "btn small", onclick: () => sketcher.fitView() }, "Encajar"));
   if (sketcher.tool === "poly" || sketcher.tool === "path") bar.append(h("button", { class: "btn small", title: "Igual que Intro o doble clic", onclick: () => sketcher.finishPoly() }, "↵ Acabar línea"));
   bar.append(h("span", { class: "spacer" }));
+  const skf = doc.features.find((x) => x.id === active);
+  const used = skf ? doc.features.some((x) => sketchUses(x).includes(skf.id)) : true;
+  const closed = skf?.type === "sketch" && skf.profiles.some((p) => !(p.kind === "poly" && p.open));
+  if (skf?.type === "sketch" && !used && closed) {
+    // el paso siguiente casi siempre es extruir: un clic
+    bar.append(h("button", { class: "btn small", title: "Termina el boceto y lo extruye (atajo E)", onclick: () => extrudeSketch(skf.id) }, "⬆ Extruir"));
+  }
   bar.append(h("button", { class: "btn small primary", onclick: () => setActive(null) }, "✓ Terminar boceto"));
   const consHint = sketcher.tool === "select" ? (n === 1 ? " · Mayús+clic en otro tramo para elegir dos" : n === 0 ? " · Clic en un tramo de unas líneas para ponerle restricciones" : "") : "";
   const nav = sketcher.coarse ? " · Dos dedos: zoom y mover" : " · Rueda: zoom · Botón derecho o central: desplazar";
@@ -2190,8 +2260,8 @@ function renderSelPanel() {
   if (p.hidden || !b) { renderGizmo(); return; }
   const mode = (m: "translate" | "rotate", label: string) => h("button", { class: `btn small ${gizmoMode === m ? "on" : ""}`, onclick: () => { gizmoMode = m; renderSelPanel(); } }, label);
   p.append(
-    h("b", {}, b.name), mode("translate", "✥ Mover"), mode("rotate", "⟳ Girar"),
-    h("button", { class: "btn small", title: "Hacer una copia al lado y elegirla", onclick: () => {
+    h("b", {}, b.name), mode("translate", "✥ Mover (G)"), mode("rotate", "⟳ Girar (R)"),
+    h("button", { class: "btn small", "data-copy": "1", title: "Hacer una copia al lado y elegirla (Ctrl D)", onclick: () => {
       const bb = viewport.bodyBox(b.id);
       const t = newFeature(doc, "transform") as TransformFeature;
       Object.assign(t, { body: b.id, copy: true, dx: fmt(bb ? Math.round((bb[1][0] - bb[0][0] + 5) * 10) / 10 : 20) });
@@ -2210,6 +2280,17 @@ function renderSelPanel() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && selBody && !active && !(document.activeElement instanceof HTMLInputElement)) { selBody = null; renderSelPanel(); }
 });
+viewport.events.onFaceDouble = (point, normal) => {
+  if (active || explode || measuring) return;
+  // doble clic en una cara: boceto encima, sin preguntar
+  const f = newFeature(doc, "sketch") as SketchFeature;
+  f.plane = { kind: "face", ...planeFromHit(point, normal), offset: "0" };
+  selBody = null;
+  doc.features.push(f);
+  setActive(f.id);
+  changed(true, true);
+  sketcher.refitSoon();
+};
 viewport.events.onBodyClick = (id) => {
   if (active || explode || measuring) return;
   selBody = id;
@@ -2398,10 +2479,12 @@ function renderSketchLines() {
 // Archivo y exportar
 // ======================================================================
 
-function toast(text: string) {
+function toast(text: string, action?: { label: string; run: () => void }) {
+  document.querySelectorAll(".toast").forEach((x) => x.remove()); // uno cada vez
   const t = h("div", { class: "toast" }, text);
+  if (action) t.append(h("button", { class: "toast-btn", onclick: () => { t.remove(); action.run(); } }, action.label));
   document.body.append(t);
-  setTimeout(() => t.remove(), 2600);
+  setTimeout(() => t.remove(), action ? 6000 : 2600);
 }
 
 function download(data: BlobPart, name: string, type: string) {
@@ -2651,7 +2734,11 @@ function drawingDialog() {
         setTimeout(() => window.print(), 50);
       } }, "Imprimir o guardar PDF"),
       h("button", { class: "btn", onclick: () => download(drawingSheet(views, snaps).svg, `${safeName()}-plano.svg`, "image/svg+xml") }, "Descargar SVG"),
-      h("button", { class: "btn", onclick: () => { if (!doc.dims?.length) return toast("Aún no has puesto ninguna cota"); if (confirm("¿Quitar todas tus cotas de este plano?")) { doc.dims = []; changed(true); draw(); } } }, "Quitar mis cotas"),
+      h("button", { class: "btn", onclick: () => {
+        if (!doc.dims?.length) return toast("Aún no has puesto ninguna cota");
+        const old = doc.dims; doc.dims = []; changed(true); draw();
+        toast("Cotas quitadas", { label: "Deshacer", run: () => { doc.dims = old; changed(true); draw(); } });
+      } }, "Quitar mis cotas"),
       h("span", { class: "spacer" }),
       h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar"),
     );
@@ -2697,7 +2784,7 @@ function openDialog() {
             openDialog();
             toast("Copia creada");
           } }, "Duplicar"),
-          m.id === docId ? null : h("button", { class: "btn small", onclick: () => { if (confirm(`¿Borrar «${m.name}» y sus versiones?`)) { storage.remove(m.id); openDialog(); } } }, "Borrar"),
+          m.id === docId ? null : twoClick("Borrar", "¿Seguro? Borrar", () => { storage.remove(m.id); openDialog(); }),
         ),
       ));
     }
@@ -2796,6 +2883,7 @@ function fileAction(a: string) {
   else if (a === "templates") templatesDialog();
   else if (a === "fit") fitDialog();
   else if (a === "family") familyDialog();
+  else if (a === "keys") keysDialog();
   else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();
 }
@@ -2902,8 +2990,59 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape" && measuring) { stopMeasure(); return; }
-  if (e.key === "Escape" && active) setActive(null);
+  if (e.key === "Escape" && active) { setActive(null); return; }
+  if ((document.querySelector("dialog[open]"))) return;
+  if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveVersionDialog(); return; }
+  if (mod && e.key.toLowerCase() === "d" && selBody) { e.preventDefault(); ($("#selpanel").querySelector("[data-copy]") as HTMLButtonElement | null)?.click(); return; }
+  if (mod || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if ((e.key === "Delete" || e.key === "Backspace") && f) { e.preventDefault(); removeFeature(f.id); return; }
+  if (k === "?" || (e.shiftKey && k === "¿")) { keysDialog(); return; }
+  if (k === "n") { fileAction("new"); return; }
+  if (k === "o") { openDialog(); return; }
+  if (selBody && !f && (k === "g" || k === "r")) { gizmoMode = k === "g" ? "translate" : "rotate"; renderSelPanel(); return; }
+  if (k === "0" || k === "inicio") { viewport.fit(); return; }
+  const tool = (Object.entries(TOOL_KEY) as [Feature["type"], string][]).find(([, key]) => key.toLowerCase() === k)?.[0];
+  if (!tool) return;
+  if (tool === "transform" && selBody) { gizmoMode = "translate"; renderSelPanel(); return; }
+  const why = toolDisabled(tool);
+  if (why) { toast(why); return; }
+  // E con un boceto recién hecho y sin usar: lo extruye
+  if (tool === "extrude") {
+    const sk = [...doc.features].reverse().find((x) => x.type === "sketch");
+    if (sk && !doc.features.some((x) => sketchUses(x).includes(sk.id))) { extrudeSketch(sk.id); return; }
+  }
+  e.preventDefault();
+  useTool(tool);
 });
+
+function keysDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const row = (k: string, t: string) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, t));
+  dlg.append(h("h2", {}, "Atajos de teclado"),
+    h("div", { class: "keys" },
+      h("table", {}, h("tbody", {},
+        h("tr", {}, h("th", { colspan: "2" }, "Añadir")),
+        row("B", "Boceto"), row("E", "Extruir (el último boceto sin usar)"), row("C", "Caja"), row("F", "Redondeo"), row("H", "Agujeros"), row("T", "Texto"), row("M", "Mover"),
+      )),
+      h("table", {}, h("tbody", {},
+        h("tr", {}, h("th", { colspan: "2" }, "General")),
+        row("Ctrl Z / Ctrl Y", "Deshacer / rehacer"), row("Supr", "Borrar el paso abierto (se puede deshacer)"), row("Esc", "Cerrar el paso o soltar la pieza"),
+        row("Ctrl S", "Guardar versión"), row("N / O", "Pieza nueva / Mis piezas"), row("0", "Encajar la vista"), row("?", "Esta ayuda"),
+      )),
+      h("table", {}, h("tbody", {},
+        h("tr", {}, h("th", { colspan: "2" }, "Pieza elegida (clic)")),
+        row("G", "Flechas para mover"), row("R", "Aros para girar"), row("Ctrl D", "Copia al lado"),
+        h("tr", {}, h("th", { colspan: "2" }, "Vista")),
+        row("Doble clic en cara", "Boceto sobre esa cara"),
+        h("tr", {}, h("th", { colspan: "2" }, "En el boceto")),
+        row("S L R C P W", "Elegir, líneas, rectángulo, círculo, polígono, camino"), row("Intro", "Acabar la línea"),
+      )),
+    ),
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  dlg.showModal();
+}
 
 // ======================================================================
 

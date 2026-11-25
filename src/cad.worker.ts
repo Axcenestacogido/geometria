@@ -860,7 +860,7 @@ function runFeatures(features: RF[], upTo?: string) {
       // validar el boceto ya, para avisar pronto
       // (un boceto que solo tiene líneas abiertas es un camino: no se valida como contorno)
       const onlyPaths = f.profiles.length > 0 && f.profiles.every((p) => p.kind === "poly" && p.open);
-      try { if (!f.off && !onlyPaths) sketchDrawing(f); } catch (e) { errors[f.id] = msg(e); }
+      try { if (!f.off && !onlyPaths && f.profiles.length) sketchDrawing(f); } catch (e) { errors[f.id] = msg(e); }
       if (i === features.length - 1) stepCache.push(snapshot(keys[i], { bodies, errors, bodiesBefore, sketches, tools, solidCount }));
       continue;
     }
