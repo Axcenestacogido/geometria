@@ -34,6 +34,8 @@ export type Profile =
       pts: PolyPoint[];
       /** true = línea abierta (no encierra nada): sirve de camino para un barrido */
       open?: boolean;
+      /** true = curva suave (spline) que pasa por todos los puntos, en vez de tramos rectos o arcos */
+      smooth?: boolean;
     });
 
 export type BoolOp = "new" | "add" | "cut" | "intersect";
@@ -231,6 +233,8 @@ export interface TextFeature extends SolidOpBase {
   angle: Expr;
   /** dónde va el centro del texto (clic en una cara). Vacío = en el suelo, en el origen */
   points: FacePoint[];
+  /** seguir la curva de una cara cilíndrica (letra a letra alrededor del cilindro) */
+  wrap?: boolean;
 }
 
 /** Barrido: un perfil que recorre un camino */
@@ -259,6 +263,30 @@ export interface ImportFeature extends SolidOpBase {
   format: "step" | "stl";
   x: Expr; y: Expr; z: Expr;
   scale: Expr;
+}
+
+/** Relieve desde una imagen: un logo extruido (o grabado) o una litofanía / mapa de alturas */
+export interface ReliefFeature extends SolidOpBase {
+  type: "relief";
+  /** id de la imagen guardada en este navegador */
+  file: string;
+  fileName: string;
+  /** alto / ancho de la imagen */
+  aspect: number;
+  /** logo = contornos de lo oscuro, extruidos; relief = alturas según lo oscuro */
+  mode: "logo" | "relief";
+  /** ancho de la imagen entera en mm */
+  width: Expr;
+  /** logo: alto de la extrusión · relieve: diferencia entre lo más claro y lo más oscuro */
+  height: Expr;
+  /** relieve: grosor de la placa por debajo */
+  base: Expr;
+  /** logo: % de oscuridad a partir del cual cuenta como logo */
+  threshold: Expr;
+  /** puntos en el lado largo de la imagen (más = más detalle y más lento) */
+  detail: Expr;
+  invert: boolean;
+  x: Expr; y: Expr; z: Expr;
 }
 
 /** Apoyar la pieza sobre una cara para imprimir (gira todos los cuerpos y los baja a Z = 0) */
@@ -371,6 +399,7 @@ export type Feature =
   | SweepFeature
   | LoftFeature
   | ImportFeature
+  | ReliefFeature
   | LayFlatFeature
   | ComponentFeature;
 
@@ -460,6 +489,8 @@ export interface BuildResult {
 export type WorkerIn =
   | { kind: "build"; seq: number; features: Resolved<Feature>[]; upTo?: string }
   | { kind: "file"; id: string; format: "step" | "stl"; data: ArrayBuffer }
+  /** imagen ya pasada a grises (0 = negro, 255 = blanco), para los relieves */
+  | { kind: "gray"; id: string; w: number; h: number; data: Uint8Array }
   | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf"; colors?: Record<string, string> }
   | { kind: "drawing"; seq: number; features: Resolved<Feature>[] }
   | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean };

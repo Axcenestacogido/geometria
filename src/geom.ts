@@ -106,12 +106,43 @@ export function arcPoints(a: [number, number], b: [number, number], s: number, s
   return out;
 }
 
+type V2 = [number, number];
+
+/**
+ * Curva suave (spline) que pasa por todos los puntos: un tramo de Bézier cúbica entre cada dos,
+ * con las tangentes de Catmull-Rom (sin picos en los puntos). Devuelve [inicio, control 1, control 2, fin].
+ */
+export function smoothSegs(pts: V2[], closed: boolean): [V2, V2, V2, V2][] {
+  const n = pts.length;
+  if (n < 2) return [];
+  const at = (i: number): V2 => (closed ? pts[((i % n) + n) % n] : pts[Math.max(0, Math.min(n - 1, i))]);
+  const out: [V2, V2, V2, V2][] = [];
+  for (let i = 0; i < (closed ? n : n - 1); i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+    const c1: V2 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2: V2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    out.push([p1, c1, c2, p2]);
+  }
+  return out;
+}
+
+/** Puntos de una Bézier cúbica, para dibujarla */
+export function bezierPoints([a, b, c, d]: [V2, V2, V2, V2], steps = 16): V2[] {
+  const out: V2[] = [];
+  for (let k = 0; k <= steps; k++) {
+    const t = k / steps, u = 1 - t;
+    const w0 = u * u * u, w1 = 3 * u * u * t, w2 = 3 * u * t * t, w3 = t * t * t;
+    out.push([w0 * a[0] + w1 * b[0] + w2 * c[0] + w3 * d[0], w0 * a[1] + w1 * b[1] + w2 * c[1] + w3 * d[1]]);
+  }
+  return out;
+}
+
 export const uid = () => Math.random().toString(36).slice(2, 9);
 
 type RProfile =
   | { kind: "rect"; x: number; y: number; w: number; h: number }
   | { kind: "circle" | "ngon"; cx: number; cy: number; r: number; n?: number }
-  | { kind: "poly"; pts: { x: number; y: number; s?: number }[]; open?: boolean };
+  | { kind: "poly"; pts: { x: number; y: number; s?: number }[]; open?: boolean; smooth?: boolean };
 
 /** Contorno 2D (en mm) de un perfil ya calculado */
 export function profileLoop(p: RProfile): [number, number][] {
@@ -129,6 +160,10 @@ export function profileLoop(p: RProfile): [number, number][] {
     return out;
   }
   const out: [number, number][] = [];
+  if (p.smooth && p.pts.length >= 2) {
+    smoothSegs(p.pts.map((q) => [q.x, q.y]), !p.open).forEach((sg, i) => out.push(...(i === 0 ? bezierPoints(sg) : bezierPoints(sg).slice(1))));
+    return out;
+  }
   p.pts.forEach((a, i) => {
     // en una línea abierta no hay tramo de vuelta al primer punto
     if (p.open && i === p.pts.length - 1) return;

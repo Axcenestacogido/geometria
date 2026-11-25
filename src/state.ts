@@ -69,13 +69,14 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   sweep: "Barrido",
   loft: "Transición",
   import: "Importado",
+  relief: "Relieve de imagen",
   layflat: "Apoyar para imprimir",
   component: "Pieza",
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", joint: "⚭", catalog: "⚙︎", split: "✂", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
-  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", layflat: "⤓", component: "❖",
+  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", relief: "▦", layflat: "⤓", component: "❖",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -131,7 +132,7 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, thickness: "2", faces: [] };
     case "pattern": {
       // por defecto, repetir el último paso que crea o quita volumen
-      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "text", "sweep", "loft", "import", "component"].includes(f.type));
+      const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "text", "sweep", "loft", "import", "relief", "component"].includes(f.type));
       return {
         id, name, type, kind: "linear", source: src?.id ?? "",
         axis: "x", count: "3", spacing: "10", axis2: "y", count2: "1", spacing2: "10",
@@ -152,6 +153,8 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, sketches: doc.features.filter((f) => f.type === "sketch").slice(-2).map((f) => f.id), ruled: false, op };
     case "import":
       return { id, name, type, file: "", fileName: "", format: "step", x: "0", y: "0", z: "0", scale: "1", op };
+    case "relief":
+      return { id, name, type, file: "", fileName: "", aspect: 1, mode: "logo", width: "60", height: hasBody ? "1" : "3", base: "0.8", threshold: "50", detail: "200", invert: false, x: "0", y: "0", z: "0", op: hasBody ? "add" : "new" };
     case "layflat":
       return { id, name, type, face: null };
     case "component":
@@ -172,6 +175,7 @@ const NUM_FIELDS: Record<string, string[]> = {
   joint: ["x", "y", "z", "value", "min", "max"],
   catalog: ["x", "y", "z", "rx", "rz", "length", "fit"],
   split: ["at", "pinD", "pinL", "count", "fit", "gap"],
+  relief: ["width", "height", "base", "threshold", "detail", "x", "y", "z"],
   gear: ["x", "y", "z", "module", "teeth", "thickness", "bore", "fit", "angle"],
   spring: ["x", "y", "z", "diameter", "wire", "pitch", "turns"],
   fillet: ["size"],

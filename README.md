@@ -49,6 +49,9 @@ descargarlas como `.json` para pasarlas a otro).
 | **Catálogo** | Rodamientos (608, 625, 688, 6001), imanes, insertos de calor M2-M5, tuercas M3-M8, perfil 2020, servo SG90 y NEMA 17. Como pieza o como hueco con holgura. |
 | **Partir** | Corta una pieza que no cabe en la cama en dos, con espigas sueltas o pegadas que se colocan solas donde caben. |
 | **Piezas (BIM)** | Material de cada cuerpo (filamentos, maderas, metales…), peso por su densidad, si se imprime, se fabrica o se compra, cantidad, referencia y notas. Listado con totales por material y coste; descarga CSV para Excel o PDF. Las de catálogo entran solas como compradas. |
+| **Relieve de imagen** | Desde un PNG o JPG: modo logo (lo oscuro se extruye o se graba, con umbral e invertir) o modo relieve/litofanía (alturas según lo oscuro, con base). |
+| **Curva suave** | En el boceto, un perfil de líneas puede ser una curva suave (spline) que pasa por todos sus puntos. Vale también como camino de un barrido. |
+| **Texto en curva** | El texto puede «seguir la curva» de una cara cilíndrica (por fuera o por dentro de un vaso): cada letra se coloca tangente y da la vuelta. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |

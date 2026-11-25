@@ -360,3 +360,7 @@ table.bom { border-collapse: collapse; width: 100%; font-size: 13px; }
 .bom tr.bom-sum td { font-weight: 700; border-bottom: 0; }
 .bom tr.bom-sub td { color: var(--muted); }
 .bom-mat { max-width: 520px; }
+
+/* relieve desde imagen */
+.relief-file { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.relief-file .relief-pic { width: 64px; height: 64px; object-fit: contain; background: #fff; border: 1px solid var(--line, #ccc); border-radius: 6px; }
