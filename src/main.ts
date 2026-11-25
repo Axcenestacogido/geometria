@@ -10,6 +10,8 @@ import { CATALOG, catalogPart } from "./catalog";
 import { MATERIALS, material, bodyInfo, bom, bomCsv, KIND_LABEL, type BomBody, type Kind } from "./bim";
 import { snapsFromPaths, nearestPoint, nearestCircle, dimValue, dimAttached, dimSvg, type Snaps, type ViewXf } from "./drawdims";
 import { files, fileId, toBase64, fromBase64 } from "./files";
+import { docForRow, rowFileName, rowFromDoc, currentRow } from "./family";
+import { makeZip } from "./zip";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
 import { Viewport, type ViewName } from "./viewport";
@@ -78,6 +80,7 @@ $("#app").innerHTML = `
     <button data-a="version">Guardar versión…<small>Una foto de cómo está ahora, con nombre</small></button>
     <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
     <button data-a="example">Abrir el ejemplo</button>
+    <button data-a="family">Familia de tamaños…<small>La misma pieza en varias medidas; exportarlas todas</small></button>
     <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
     <button data-a="templates">Plantillas…<small>Caja, bisagra, engranajes, muelle, clip, tornillo</small></button>
     <button data-a="dup">Duplicar esta pieza</button>
@@ -102,6 +105,7 @@ $("#app").innerHTML = `
         <button class="btn small rbtn" id="measure" title="Medir distancias entre dos puntos"><i>📏</i><span>Medir</span></button>
         <button class="btn small rbtn" id="section" title="Cortar la pieza con un plano para ver el interior"><i>✂</i><span>Corte</span></button>
         <button class="btn small rbtn" id="drawing" title="Plano 2D con medidas, para imprimir o guardar en PDF"><i>📐</i><span>Plano</span></button>
+        <button class="btn small rbtn" id="explode" title="Vista explosionada: separar las piezas de un ensamblaje y grabar un vídeo"><i>💥</i><span>Explosionar</span></button>
         <button class="btn small rbtn" id="bom" title="Listado de piezas: materiales, pesos y costes (BIM)"><i>🧾</i><span>Piezas</span></button>
       </div>
       <span class="sep"></span>
@@ -125,6 +129,7 @@ $("#app").innerHTML = `
     <div class="undo-float"><button class="btn" id="undo-m" title="Deshacer">↶</button><button class="btn" id="redo-m" title="Rehacer">↷</button></div>
     <div class="banner" id="banner" hidden></div>
     <div class="secpanel" id="secpanel" hidden></div>
+    <div class="secpanel explpanel" id="explpanel" hidden></div>
     <div class="sketch" id="sketch">
       <div class="sketchbar" id="sketchbar"></div>
       <div class="sketchhint" id="sketchhint"></div>
@@ -428,6 +433,8 @@ function addFeature(type: Feature["type"]) {
 
 function setActive(id: string | null) {
   active = id;
+  // al editar un paso las piezas vuelven a su sitio (los clics sobre caras tienen que cuadrar)
+  if (id && explode) { explode = null; renderExplode(); }
   pickingFace = false;
   const f = doc.features.find((x) => x.id === id);
   if (f?.type === "sketch") {
@@ -805,6 +812,140 @@ function renderColors(box: HTMLElement, bodies: { id: string; name: string }[]) 
     box.append(h("div", { class: "color-row" }, input, h("span", { class: "grow" }, b.name), materialSelect(b.id), quick));
   });
   box.append(h("div", { class: "empty" }, "Cada cuerpo sale como un objeto aparte en el 3MF, con su color. En Bambu Studio u Orca asígnale después el filamento del AMS a cada objeto (el color guardado sirve de guía; no todos los laminadores lo leen)."));
+}
+
+// ---------- vista explosionada ----------
+let explode: { k: number; mode: "center" | "up" } | null = null;
+function renderExplode() {
+  const p = $("#explpanel");
+  $("#explode").classList.toggle("on", !!explode);
+  p.hidden = !explode;
+  p.innerHTML = "";
+  if (!explode) { viewport.setExplode(0); return; }
+  const e = explode;
+  const range = h("input", { type: "range", min: "0", max: "100", value: String(Math.round(e.k * 100)), title: "Cuánto se separan" }) as HTMLInputElement;
+  range.addEventListener("input", () => { e.k = Number(range.value) / 100; viewport.setExplode(e.k, e.mode); });
+  const modeBtn = (m: "center" | "up", label: string, title: string) => h("button", { class: `btn small ${e.mode === m ? "on" : ""}`, title, onclick: () => { e.mode = m; renderExplode(); viewport.fitExploded(); } }, label);
+  const rec = h("button", { class: "btn small", title: "Graba un vídeo de 8 s: se separan, la cámara da una vuelta y se juntan" }, "🎬 Vídeo") as HTMLButtonElement;
+  rec.addEventListener("click", async () => {
+    if (!Viewport.videoType()) return toast("Este navegador no sabe grabar vídeo");
+    rec.disabled = true;
+    try {
+      const blob = await viewport.recordExplode(8, (f) => { rec.textContent = `Grabando ${Math.round(f * 100)} %`; });
+      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+      download(blob, `${safeName()}-explosionada.${ext}`, blob.type);
+      toast(ext === "webm" ? "Vídeo listo (WebM: lo abren Chrome, VLC y WhatsApp Web)" : "Vídeo listo");
+    } catch (err) {
+      toast("No se pudo grabar: " + (err as Error).message);
+    } finally {
+      rec.disabled = false;
+      rec.textContent = "🎬 Vídeo";
+    }
+  });
+  p.append(
+    h("b", {}, "Explosionar"), modeBtn("center", "Desde el centro", "Cada pieza se aleja del centro"), modeBtn("up", "Hacia arriba", "Apiladas: cada pieza sube según su altura"),
+    range, rec,
+    h("button", { class: "btn small", title: "Juntar las piezas", onclick: () => { explode = null; renderExplode(); } }, "✕"),
+  );
+  viewport.setExplode(e.k, e.mode);
+}
+$("#explode").addEventListener("click", () => {
+  if (!explode && (build?.bodies.length ?? 0) < 2) return toast("La vista explosionada necesita dos cuerpos o más");
+  if (explode) explode = null;
+  else { setActive(null); explode = { k: 0.5, mode: "center" }; }
+  renderExplode();
+  if (explode) viewport.fitExploded();
+});
+
+// ---------- familia de tamaños ----------
+function familyDialog() {
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  if (!doc.variables.length) {
+    dlg.append(h("h2", {}, "Familia de tamaños"),
+      h("p", {}, "Una familia es la misma pieza en varias medidas (por ejemplo, un soporte para M3, M4 y M6). Primero crea variables (abajo a la izquierda, «+ Añadir») y úsalas en las medidas de los pasos."),
+      h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+    return dlg.showModal();
+  }
+  const fam = doc.family ?? { vars: doc.variables.slice(0, 3).map((v) => v.name), rows: [] };
+  fam.vars = fam.vars.filter((n) => doc.variables.some((v) => v.name === n));
+  const save = () => { doc.family = fam; changed(true); };
+  const body = h("div", {});
+  const draw = () => {
+    body.innerHTML = "";
+    body.append(h("h3", {}, "Variables que cambian"));
+    const vbox = h("div", { class: "fam-vars" });
+    for (const v of doc.variables) {
+      const c = h("input", { type: "checkbox", checked: fam.vars.includes(v.name) }) as HTMLInputElement;
+      c.addEventListener("change", () => { fam.vars = c.checked ? [...fam.vars, v.name] : fam.vars.filter((n) => n !== v.name); save(); draw(); });
+      vbox.append(h("label", { class: "check" }, c, v.name));
+    }
+    body.append(vbox);
+    const cur = currentRow(doc, fam);
+    const tbl = h("table", { class: "bom fam" });
+    tbl.append(h("thead", {}, h("tr", {}, h("th", {}, "Nombre"), ...fam.vars.map((n) => h("th", {}, n)), h("th", {}, ""))));
+    const tb = h("tbody");
+    fam.rows.forEach((r, i) => {
+      const name = h("input", { value: r.name, class: "fam-name" }) as HTMLInputElement;
+      name.addEventListener("change", () => { r.name = name.value; save(); });
+      const cells = fam.vars.map((n) => {
+        const inp = h("input", { value: r.values[n] ?? "", class: "fam-val", spellcheck: "false" }) as HTMLInputElement;
+        inp.addEventListener("change", () => { r.values[n] = inp.value as never; save(); });
+        return h("td", {}, inp);
+      });
+      tb.append(h("tr", { class: i === cur ? "on" : "" }, h("td", {}, name), ...cells, h("td", { class: "fam-act" },
+        h("button", { class: "btn small", title: "Poner estas medidas en la pieza", onclick: () => {
+          const d = docForRow(doc, fam, i);
+          doc.variables = d.variables;
+          save(); draw(); toast(`Tamaño «${r.name}»`);
+        } }, i === cur ? "✓ Puesto" : "Ver"),
+        h("button", { class: "btn small", title: "Quitar fila", onclick: () => { fam.rows.splice(i, 1); save(); draw(); } }, "✕"))));
+    });
+    tbl.append(tb);
+    body.append(tbl);
+    if (!fam.rows.length) body.append(h("div", { class: "empty" }, "Aún no hay tamaños. «+ Tamaño» copia las medidas que tiene ahora la pieza; luego cambia las que quieras."));
+    body.append(h("div", { class: "seg-btns" },
+      h("button", { class: "btn small", onclick: () => { fam.rows.push(rowFromDoc(doc, fam, `Tamaño ${fam.rows.length + 1}`)); save(); draw(); } }, "+ Tamaño")));
+  };
+  draw();
+  const fmtSel = h("select", {}, h("option", { value: "3mf" }, "3MF"), h("option", { value: "stl" }, "STL"), h("option", { value: "step" }, "STEP")) as HTMLSelectElement;
+  const go = h("button", { class: "btn primary" }, "Exportar todas (ZIP)") as HTMLButtonElement;
+  go.addEventListener("click", async () => {
+    if (!fam.rows.length) return toast("Añade al menos un tamaño");
+    go.disabled = true;
+    try {
+      const out: { name: string; data: Uint8Array }[] = [];
+      const bad: string[] = [];
+      for (let i = 0; i < fam.rows.length; i++) {
+        go.textContent = `Exportando ${i + 1} de ${fam.rows.length}…`;
+        const d = docForRow(doc, fam, i);
+        const r = resolveDoc(d);
+        if (Object.keys(r.fieldErrors).length) { bad.push(fam.rows[i].name); continue; }
+        const m = await exportFeatures(r.features, fmtSel.value as "3mf" | "stl" | "step", d.colors);
+        if (!m.data) { bad.push(fam.rows[i].name); continue; }
+        out.push({ name: `${rowFileName(doc.name, fam.rows[i].name, i)}.${fmtSel.value}`, data: new Uint8Array(m.data) });
+      }
+      if (out.length) download(makeZip(out), `${safeName()}-familia.zip`, "application/zip");
+      toast(bad.length ? `Hechas ${out.length}; fallaron: ${bad.join(", ")}` : `${out.length} archivos en el ZIP`);
+    } finally {
+      go.disabled = false; go.textContent = "Exportar todas (ZIP)";
+      rebuild();
+    }
+  });
+  dlg.append(h("h2", {}, "Familia de tamaños"),
+    h("p", { class: "empty" }, "La misma pieza en varias medidas. Cada fila es un tamaño: pon sus valores (pueden ser fórmulas) y pulsa «Ver» para probarlo."),
+    body,
+    h("div", { class: "actions" }, h("label", { class: "inline" }, "Formato ", fmtSel), go, h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar")));
+  dlg.showModal();
+}
+
+/** Exporta unos pasos ya resueltos (sin tocar la pieza que se ve) */
+function exportFeatures(features: ReturnType<typeof resolveDoc>["features"], format: "stl" | "step" | "3mf", colors?: Record<string, string>) {
+  return new Promise<Extract<WorkerOut, { kind: "exported" }>>((res) => {
+    const s = ++seq;
+    exportWaiters.set(s, res);
+    worker.postMessage({ kind: "export", seq: s, features, format, colors });
+  });
 }
 
 // ---------- vista de corte ----------
@@ -2478,6 +2619,7 @@ function fileAction(a: string) {
   else if (a === "history") historyDialog();
   else if (a === "templates") templatesDialog();
   else if (a === "fit") fitDialog();
+  else if (a === "family") familyDialog();
   else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();
 }

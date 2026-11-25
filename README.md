@@ -52,6 +52,8 @@ descargarlas como `.json` para pasarlas a otro).
 | **Relieve de imagen** | Desde un PNG o JPG: modo logo (lo oscuro se extruye o se graba, con umbral e invertir) o modo relieve/litofanía (alturas según lo oscuro, con base). |
 | **Curva suave** | En el boceto, un perfil de líneas puede ser una curva suave (spline) que pasa por todos sus puntos. Vale también como camino de un barrido. |
 | **Texto en curva** | El texto puede «seguir la curva» de una cara cilíndrica (por fuera o por dentro de un vaso): cada letra se coloca tangente y da la vuelta. |
+| **Familia de tamaños** | Archivo → Familia de tamaños. Una tabla con los valores de tus variables para cada tamaño; «Ver» prueba uno y «Exportar todas» baja un ZIP con un 3MF/STL/STEP por tamaño. |
+| **Explosionar** | Separa las piezas de un ensamblaje (desde el centro o apiladas hacia arriba) con un deslizador, y graba un vídeo de 8 s (MP4 o WebM según el navegador). |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
 | **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
