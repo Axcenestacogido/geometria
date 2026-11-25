@@ -1259,6 +1259,40 @@ async function doExport(m: Extract<WorkerIn, { kind: "export" }>) {
 }
 
 
+/**
+ * Sección A-A: corta la pieza por un plano y la mira de frente (axis «y») o de lado (axis «x»),
+ * quitando la mitad que queda delante. La cara cortada sale aparte, en triángulos, para rayarla.
+ */
+function sectionView(all: Shape, sec: { axis: "x" | "y"; at?: number }, flat: (d: R.Drawing) => string[]): DrawingView {
+  const [[x0, y0, z0], [x1, y1, z1]] = all.boundingBox.bounds as [number[], number[]];
+  const ax = sec.axis === "y" ? 1 : 0;
+  const lo = ax === 1 ? y0 : x0, hi = ax === 1 ? y1 : x1;
+  const at = sec.at ?? (lo + hi) / 2;
+  if (!(at > lo + 1e-6 && at < hi - 1e-6)) throw new Error("el corte de la sección queda fuera de la pieza");
+  const pad = 1;
+  // se quita lo que está entre quien mira y el plano: de frente se mira hacia +Y, de lado hacia +X
+  const cutter = ax === 1
+    ? R.makeBox([x0 - pad, y0 - pad, z0 - pad], [x1 + pad, at, z1 + pad])
+    : R.makeBox([x0 - pad, y0 - pad, z0 - pad], [at, y1 + pad, z1 + pad]);
+  const half = all.cut(cutter as Shape) as Shape;
+  const { visible } = R.drawProjection(half, ax === 1 ? "front" : "right");
+  const vis = flat(visible);
+  const [[u0, v0], [u1, v1]] = visible.boundingBox.bounds;
+  // cara cortada: los triángulos de la malla que están sobre el plano. De frente u = X, de lado u = −Y; v = Z
+  const mm = half.mesh({ tolerance: 0.05, angularTolerance: 0.3 });
+  const V = mm.vertices, T = mm.triangles;
+  const on = (i: number) => Math.abs(V[i * 3 + ax] - at) < 1e-4;
+  const uv = (i: number) => {
+    const u = ax === 1 ? V[i * 3] : -V[i * 3 + 1];
+    return `${u.toFixed(3)} ${(-V[i * 3 + 2]).toFixed(3)}`;
+  };
+  const tri: string[] = [];
+  for (let t = 0; t < T.length; t += 3) {
+    if (on(T[t]) && on(T[t + 1]) && on(T[t + 2])) tri.push(`M${uv(T[t])}L${uv(T[t + 1])}L${uv(T[t + 2])}Z`);
+  }
+  return { name: "section", visible: vis, hidden: [], hatch: tri.join(""), box: [u0, -v1, u1, -v0], cut: { axis: sec.axis, at } };
+}
+
 /** Plano 2D: vistas de frente, arriba, derecha y 3D, con las líneas ocultas aparte */
 function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
   try {
@@ -1283,7 +1317,11 @@ function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
       // el SVG tiene la Y hacia abajo: replicad ya la da la vuelta
       views.push({ name, visible: vis, hidden: name === "iso" ? [] : flat(hidden), box: [x0, -y1, x1, -y0] });
     }
-    post({ kind: "drawing", seq: m.seq, views });
+    let error: string | undefined;
+    if (m.section) {
+      try { views.push(sectionView(all, m.section, flat)); } catch (e) { error = "sin sección: " + msg(e); }
+    }
+    post({ kind: "drawing", seq: m.seq, views, error });
   } catch (e) {
     post({ kind: "drawing", seq: m.seq, error: msg(e) });
   }
