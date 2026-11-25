@@ -53,11 +53,24 @@ export type SketchConstraint =
   | { id: string; kind: "h" | "v"; s: SegRef }
   | { id: string; kind: "equal" | "parallel" | "perp"; s: SegRef; t: SegRef };
 
+/** Imagen de referencia de fondo en un boceto (se guarda aparte, como los archivos importados) */
+export interface RefImage {
+  file: string;
+  /** esquina de abajo a la izquierda y ancho, en mm del boceto; el alto sale de la proporción */
+  x: number; y: number; w: number;
+  /** proporción alto/ancho de la imagen */
+  aspect: number;
+  opacity: number;
+  /** también se ve en la vista 3D */
+  show3d?: boolean;
+}
+
 export interface SketchFeature extends FeatureBase {
   type: "sketch";
   plane: PlaneDef;
   profiles: Profile[];
   constraints?: SketchConstraint[];
+  image?: RefImage;
 }
 
 interface SolidOpBase extends FeatureBase {
@@ -255,6 +268,30 @@ export interface LayFlatFeature extends FeatureBase {
   face: Vec3 | null;
 }
 
+/** Mueve, gira o escala un cuerpo que ya existe (o una copia suya) */
+export interface TransformFeature extends FeatureBase {
+  type: "transform";
+  /** cuerpo a mover; vacío = el último */
+  body: string;
+  dx: Expr; dy: Expr; dz: Expr;
+  rx: Expr; ry: Expr; rz: Expr;
+  scale: Expr;
+  /** true = deja el original y crea un cuerpo nuevo movido */
+  copy: boolean;
+}
+
+/** Suma, resta o interseca cuerpos que ya existen */
+export interface CombineFeature extends FeatureBase {
+  type: "combine";
+  op: "add" | "cut" | "intersect";
+  /** el que se queda con el resultado */
+  target: string;
+  /** los que se suman/restan a él */
+  tools: string[];
+  /** false = las herramientas desaparecen al combinarlas */
+  keep: boolean;
+}
+
 /** Una pieza guardada metida dentro de esta (copia), con sus variables cambiables */
 export interface ComponentFeature extends SolidOpBase {
   type: "component";
@@ -279,6 +316,8 @@ export type Feature =
   | SphereFeature
   | GearFeature
   | SpringFeature
+  | TransformFeature
+  | CombineFeature
   | EdgeFeature
   | ShellFeature
   | PatternFeature
@@ -304,7 +343,7 @@ export interface Doc {
   /** Color de cada cuerpo (id del cuerpo → "#rrggbb") */
   colors?: Record<string, string>;
   /** Solo en el .json descargado: archivos importados (base64), para llevarlos a otro equipo */
-  files?: Record<string, { name: string; format: "step" | "stl"; data: string }>;
+  files?: Record<string, { name: string; format: "step" | "stl" | "image"; data: string }>;
 }
 
 // ---------- Mensajes con el trabajador (motor geométrico) ----------

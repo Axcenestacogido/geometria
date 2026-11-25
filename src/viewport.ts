@@ -3,6 +3,7 @@
 // se deforman con la distancia). Las vistas Arriba, Frente, etc. van siempre en paralela.
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import type { BodyMesh, Vec3 } from "./types";
 import type { Basis } from "./geom";
 
@@ -50,6 +51,8 @@ export class Viewport {
   private markGroup = new THREE.Group();
   private measureGroup = new THREE.Group();
   private checkGroup = new THREE.Group();
+  private refGroup = new THREE.Group();
+  private textures = new Map<string, THREE.Texture>();
   private grid!: THREE.GridHelper;
   private axes!: THREE.Group;
   private hoverObj: THREE.Object3D | null = null;
@@ -65,6 +68,11 @@ export class Viewport {
   /** plano de corte (null = sin corte) */
   private section: THREE.Plane | null = null;
   private colors: Record<string, string> = {};
+  /** flechas para mover/girar un cuerpo con el ratón o el dedo */
+  private gizmo: TransformControls | null = null;
+  private gizmoObj = new THREE.Object3D();
+  private gizmoBody = "";
+  private gizmoDone: ((d: { dx: number; dy: number; dz: number; rz: number }) => void) | null = null;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -84,7 +92,7 @@ export class Viewport {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x445566, 1.4);
     hemi.position.set(0, 0, 1);
     this.light = new THREE.DirectionalLight(0xffffff, 1.6);
-    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup);
+    this.scene.add(hemi, this.light, this.light.target, this.bodiesGroup, this.sketchGroup, this.markGroup, this.measureGroup, this.checkGroup, this.refGroup);
     this.buildGrid(200);
     this.applyTheme();
 
@@ -179,7 +187,75 @@ export class Viewport {
     to.updateProjectionMatrix();
     this.camera = to;
     this.controls.object = to;
+    if (this.gizmo) this.gizmo.camera = to;
     this.controls.update();
+  }
+
+  /** Centro de la caja de un cuerpo dibujado */
+  bodyCenter(id: string): Vec3 | null {
+    const box = new THREE.Box3();
+    for (const c of this.bodiesGroup.children) if (c.userData.body === id && (c as THREE.Mesh).isMesh && !c.userData.cap) box.expandByObject(c);
+    if (box.isEmpty()) return null;
+    const v = box.getCenter(new THREE.Vector3());
+    return [v.x, v.y, v.z];
+  }
+
+  /**
+   * Flechas sobre un cuerpo: al soltar, avisa de cuánto se movió (mm) y giró en Z (grados).
+   * Mientras arrastras, el cuerpo se mueve en la vista (la pieza de verdad se recalcula al soltar).
+   */
+  setGizmo(g: { body: string; center: Vec3; mode: "translate" | "rotate"; onDone: (d: { dx: number; dy: number; dz: number; rz: number }) => void } | null) {
+    if (!g) {
+      if (this.gizmo) { this.scene.remove(this.gizmo.getHelper()); this.gizmo.detach(); this.gizmo.dispose(); this.gizmo = null; }
+      this.gizmoDone = null;
+      return;
+    }
+    if (!this.gizmo) {
+      const tc = new TransformControls(this.camera, this.renderer.domElement);
+      tc.setSpace("world");
+      tc.addEventListener("dragging-changed", (e) => {
+        this.controls.enabled = !(e as unknown as { value: boolean }).value;
+        if (!(e as unknown as { value: boolean }).value) this.finishGizmo();
+      });
+      tc.addEventListener("objectChange", () => this.previewGizmo());
+      this.scene.add(this.gizmoObj);
+      this.scene.add(tc.getHelper());
+      this.gizmo = tc;
+    }
+    const tc = this.gizmo;
+    tc.camera = this.camera;
+    tc.setMode(g.mode);
+    tc.showX = g.mode === "translate"; tc.showY = g.mode === "translate"; tc.showZ = true;
+    tc.size = this.touch || matchMedia("(pointer: coarse)").matches ? 1.4 : 1;
+    this.gizmoBody = g.body;
+    this.gizmoDone = g.onDone;
+    this.gizmoObj.position.set(...g.center);
+    this.gizmoObj.rotation.set(0, 0, 0);
+    this.gizmoObj.userData.start = [...g.center];
+    tc.attach(this.gizmoObj);
+  }
+
+  private gizmoMatrix() {
+    const c = new THREE.Vector3(...(this.gizmoObj.userData.start as Vec3));
+    this.gizmoObj.updateMatrix();
+    return this.gizmoObj.matrix.clone().multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
+  }
+
+  private previewGizmo() {
+    const m = this.gizmoMatrix();
+    for (const c of this.bodiesGroup.children) if (c.userData.body === this.gizmoBody) {
+      c.matrixAutoUpdate = false;
+      c.matrix.copy(m);
+      c.matrixWorldNeedsUpdate = true;
+    }
+  }
+
+  private finishGizmo() {
+    const st = this.gizmoObj.userData.start as Vec3;
+    const p = this.gizmoObj.position;
+    const d = { dx: p.x - st[0], dy: p.y - st[1], dz: p.z - st[2], rz: THREE.MathUtils.radToDeg(this.gizmoObj.rotation.z) };
+    if (Math.hypot(d.dx, d.dy, d.dz) < 1e-6 && Math.abs(d.rz) < 1e-6) return;
+    this.gizmoDone?.(d);
   }
 
   private clip() { return this.section ? [this.section] : []; }
@@ -238,6 +314,7 @@ export class Viewport {
       const lg = new THREE.BufferGeometry();
       lg.setAttribute("position", new THREE.BufferAttribute(b.lines, 3));
       const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: edgeColor }));
+      lines.userData.body = b.id;
       this.edgeObjects.push({ line: lines, pts: b.lines, groups: b.edgeGroups });
       // la "tapa" del corte: las caras de dentro, en color plano
       // (más oscura que el cuerpo, para que se distinga del resto)
@@ -271,6 +348,35 @@ export class Viewport {
     const [x, y, z] = c.bed;
     const box = new THREE.Box3(new THREE.Vector3(-x / 2, -y / 2, 0), new THREE.Vector3(x / 2, y / 2, z));
     this.checkGroup.add(new THREE.Box3Helper(box, new THREE.Color(css("--muted"))));
+  }
+
+  /** Imágenes de referencia de los bocetos, como láminas en su plano */
+  setRefImages(list: { url: string; basis: Basis; x: number; y: number; w: number; h: number; opacity: number }[]) {
+    for (const c of [...this.refGroup.children]) {
+      this.refGroup.remove(c);
+      const m = c as THREE.Mesh;
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
+    }
+    for (const im of list) {
+      let tex = this.textures.get(im.url);
+      if (!tex) {
+        tex = new THREE.TextureLoader().load(im.url);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this.textures.set(im.url, tex);
+      }
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(im.w, im.h), new THREE.MeshBasicMaterial({
+        map: tex, transparent: true, opacity: im.opacity, side: THREE.DoubleSide, depthWrite: false,
+      }));
+      const b = im.basis;
+      const mx = new THREE.Matrix4().makeBasis(new THREE.Vector3(...b.x), new THREE.Vector3(...b.y), new THREE.Vector3(...b.n));
+      const cu = im.x + im.w / 2, cv = im.y + im.h / 2;
+      mx.setPosition(new THREE.Vector3(
+        b.origin[0] + b.x[0] * cu + b.y[0] * cv, b.origin[1] + b.x[1] * cu + b.y[1] * cv, b.origin[2] + b.x[2] * cu + b.y[2] * cv));
+      mesh.applyMatrix4(mx);
+      mesh.renderOrder = -1;
+      this.refGroup.add(mesh);
+    }
   }
 
   /** Contornos de bocetos (en 3D) */

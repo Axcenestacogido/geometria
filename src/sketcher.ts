@@ -5,6 +5,7 @@ import type { Profile, SegRef, SketchConstraint, SketchFeature } from "./types";
 import { CONSTRAINT_GLYPH, CONSTRAINT_NAME, segOf, solveSketch, cleanConstraints } from "./constraints";
 import { arcPoints, uid } from "./geom";
 import { fmt } from "./expr";
+import { filletAll, filletCorner, offsetPoly, removeSegment, type NP } from "./sketchops";
 
 export type SketchTool = "select" | "poly" | "path" | "rect" | "circle" | "ngon";
 
@@ -56,6 +57,13 @@ export class SketchEditor {
   private touches = new Map<number, P2>();
   private pinch: { d0: number; z0: number; m0: P2; c0: P2 } | null = null;
   private draftAtTouch = 0;
+
+  /** imagen de fondo del boceto (mm del boceto) */
+  private image: { url: string; x: number; y: number; w: number; h: number; opacity: number } | null = null;
+  setImage(im: { url: string; x: number; y: number; w: number; h: number; opacity: number } | null) {
+    this.image = im;
+    this.render();
+  }
 
   /** Volver a encajar la vista cuando llegue la referencia (p. ej. tras cambiar de plano) */
   refitSoon() { this.pendingFit = true; }
@@ -232,6 +240,12 @@ export class SketchEditor {
     const W = this.W, H = this.H;
     this.svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     const out: string[] = [];
+    // imagen de referencia, debajo de todo
+    if (this.image) {
+      const im = this.image;
+      const [sx, sy] = this.toScreen([im.x, im.y + im.h]);
+      out.push(`<image href="${im.url}" x="${sx}" y="${sy}" width="${im.w * this.zoom}" height="${im.h * this.zoom}" opacity="${im.opacity}" preserveAspectRatio="none" class="refimg"/>`);
+    }
     // rejilla
     const st = this.step;
     const big = st * 5;
@@ -529,6 +543,110 @@ export class SketchEditor {
     }
     this.cb.onChange(true);
     this.render();
+    return null;
+  }
+
+  // ---------- redondear, desfase, quitar tramo ----------
+  private numPts(p: Extract<Profile, { kind: "poly" }>): NP[] {
+    const ev = this.cb.ev;
+    return p.pts.map((q) => ({ x: ev(q.x), y: ev(q.y), s: q.s ? ev(q.s) : 0 }));
+  }
+  private setPts(p: Extract<Profile, { kind: "poly" }>, pts: NP[]) {
+    p.pts = pts.map((q) => (Math.abs(q.s) > 1e-9 ? { x: fmt(q.x), y: fmt(q.y), s: fmt(q.s) } : { x: fmt(q.x), y: fmt(q.y) }));
+    // los números de tramo cambian: fuera las restricciones de este contorno
+    if (this.feature?.constraints) {
+      this.feature.constraints = this.feature.constraints.filter((c) => c.s.p !== p.id && (!("t" in c) || c.t.p !== p.id));
+      if (!this.feature.constraints.length) delete this.feature.constraints;
+    }
+  }
+  private commit() {
+    this.picks = [];
+    this.selSeg = null;
+    this.cb.onChange(true);
+    this.render();
+  }
+
+  /** Redondea: la esquina entre los dos tramos elegidos, o todas las del contorno elegido. Devuelve un aviso o null. */
+  filletSelection(r: number): string | null {
+    const f = this.feature;
+    if (!f) return null;
+    if (!(r > 0)) return "el radio tiene que ser mayor que 0";
+    try {
+      if (this.picks.length === 2 && this.picks[0].p === this.picks[1].p) {
+        const p = f.profiles.find((q) => q.id === this.picks[0].p);
+        if (p?.kind !== "poly") return "elige tramos de unas líneas";
+        const n = p.pts.length, [a, b] = [this.picks[0].i, this.picks[1].i];
+        const corner = (a + 1) % n === b ? b : (b + 1) % n === a ? a : -1;
+        if (corner < 0) return "los dos tramos tienen que tocarse";
+        this.setPts(p, filletCorner(this.numPts(p), corner, r, !p.open));
+        this.commit();
+        return null;
+      }
+      const p = f.profiles.find((q) => q.id === this.selected);
+      if (!p) return "elige un contorno, o dos tramos que se toquen";
+      if (p.kind === "rect") { p.r = fmt(r); this.commit(); return null; }
+      if (p.kind !== "poly") return "los círculos y polígonos no tienen esquinas que redondear";
+      const { pts, done } = filletAll(this.numPts(p), r, !p.open);
+      if (!done) return "ninguna esquina admite ese radio";
+      this.setPts(p, pts);
+      this.commit();
+      return null;
+    } catch (e) { return (e as Error).message; }
+  }
+
+  /** Copia paralela del contorno elegido, a distancia d (positiva = hacia fuera) */
+  offsetSelected(d: number): string | null {
+    const f = this.feature;
+    const p = f?.profiles.find((q) => q.id === this.selected);
+    if (!f || !p) return "elige primero un contorno";
+    if (!d) return "pon una distancia distinta de 0";
+    const ev = this.cb.ev;
+    const id = uid();
+    let np: Profile;
+    try {
+      if (p.kind === "circle") {
+        const r = ev(p.r) + d;
+        if (r <= 0) return "el círculo desaparecería";
+        np = { ...p, id, r: fmt(r) };
+      } else if (p.kind === "rect") {
+        const w = ev(p.w) + 2 * d, hh = ev(p.h) + 2 * d;
+        if (w <= 0 || hh <= 0) return "el rectángulo desaparecería";
+        const r0 = ev(p.r);
+        np = { ...p, id, x: fmt(ev(p.x) - d), y: fmt(ev(p.y) - d), w: fmt(w), h: fmt(hh), r: fmt(r0 > 0 ? Math.max(0, r0 + d) : 0) };
+      } else if (p.kind === "ngon") {
+        const n = Math.round(ev(p.n)), r = ev(p.r) + d / Math.cos(Math.PI / n);
+        if (r <= 0) return "el polígono desaparecería";
+        np = { ...p, id, r: fmt(r) };
+      } else {
+        const q: Profile = { ...p, id, pts: [] };
+        this.setPts(q as Extract<Profile, { kind: "poly" }>, offsetPoly(this.numPts(p), d, !p.open));
+        np = q;
+      }
+    } catch (e) { return (e as Error).message; }
+    f.profiles.push(np);
+    this.selected = id;
+    this.cb.onSelect(id, null);
+    this.commit();
+    return null;
+  }
+
+  /** Quita el tramo elegido de unas líneas (un contorno cerrado pasa a línea abierta) */
+  removeSelectedSegment(): string | null {
+    const f = this.feature;
+    const r = this.picks[0] ?? (this.selected && this.selSeg !== null ? { p: this.selected, i: this.selSeg } : null);
+    if (!f || !r) return "elige primero un tramo";
+    const p = f.profiles.find((q) => q.id === r.p);
+    if (p?.kind !== "poly") return "solo se quitan tramos de unas líneas";
+    const parts = removeSegment(this.numPts(p), r.i, !p.open);
+    const idx = f.profiles.indexOf(p);
+    const made: Profile[] = parts.map((pts, k) => {
+      const q = { ...p, id: k === 0 ? p.id : uid(), open: true, pts: [] } as Extract<Profile, { kind: "poly" }>;
+      this.setPts(q, pts);
+      return q;
+    });
+    f.profiles.splice(idx, 1, ...made);
+    if (!made.length) { this.selected = null; this.cb.onSelect(null, null); }
+    this.commit();
     return null;
   }
 

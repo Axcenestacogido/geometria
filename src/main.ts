@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, GearFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
+  TextFeature, TextFont, SweepFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, LayFlatFeature, ComponentFeature, DrawingView,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -35,6 +35,8 @@ let build: BuildResult | null = null;
 let engineReady = false;
 let seq = 0;
 let lastBodiesKey = "";
+/** medida del cuadro de redondear/desfasar del boceto */
+let sketchAmount = "2";
 /** móvil: panel abierto abajo (añadir, pasos, props, vars) */
 let sheet: string | null = null;
 const isMobile = () => matchMedia("(max-width: 700px)").matches;
@@ -135,6 +137,7 @@ $("#app").innerHTML = `
 <input type="file" id="file" accept=".json,application/json" hidden />
 <input type="file" id="file3d" accept=".step,.stp,.stl" hidden />
 <input type="file" id="filesvg" accept=".svg,image/svg+xml" hidden />
+<input type="file" id="fileimg" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
 <div id="printarea"></div>
 `;
 
@@ -206,7 +209,7 @@ async function sendFiles() {
     if (f.type !== "import" || !f.file || sentFiles.has(f.file)) continue;
     sentFiles.add(f.file);
     const st = await files.get(f.file);
-    if (!st) { sentFiles.delete(f.file); continue; }
+    if (!st || st.format === "image") { sentFiles.delete(f.file); continue; }
     worker.postMessage({ kind: "file", id: f.file, format: st.format, data: st.data });
   }
 }
@@ -221,7 +224,8 @@ function rebuild() {
     void sendFiles();
     const f = doc.features.find((x) => x.id === active);
     // al editar un boceto o un redondeo se ve la pieza como estaba antes de ese paso
-    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : undefined;
+    // al mover un cuerpo se ve la pieza justo después de ese paso (aún sin los siguientes)
+    const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : f?.type === "transform" ? doc.features[doc.features.indexOf(f) + 1]?.id : undefined;
     worker.postMessage({ kind: "build", seq: ++seq, features: resolved.features, upTo });
   }, 90);
 }
@@ -288,14 +292,14 @@ function renderUndo() {
 const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
-  { type: "gear" }, { type: "spring" },
+  { type: "gear" }, { type: "spring" }, { type: "transform" }, { type: "combine" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
   { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
   { type: "component" }, { type: "layflat" },
 ];
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar",
+  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
@@ -304,6 +308,8 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   import: "Traer una pieza STEP o STL de otro programa",
   component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
+  transform: "Mover, girar o escalar un cuerpo (o una copia), con flechas o con números",
+  combine: "Sumar, restar o intersecar cuerpos que ya existen",
   gear: "Rueda dentada recta: eliges el módulo y los dientes",
   spring: "Muelle de compresión: diámetro, hilo, paso y vueltas",
 };
@@ -315,7 +321,7 @@ function renderTools() {
   const hasBody = !!build?.bodies.length;
   for (const t of ADD) {
     const needSketch = t.type === "extrude" || t.type === "revolve" || t.type === "sweep" || t.type === "loft";
-    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat"].includes(t.type);
+    const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine"].includes(t.type);
     box.append(h("button", {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
@@ -723,6 +729,40 @@ function renderProps() {
       sec.append(...opFields(f));
       break;
     }
+    case "transform": {
+      const before = build?.bodiesBefore[f.id] ?? [];
+      sec.append(selectField("Cuerpo", f.body, [["", "El último"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => (f.body = v)));
+      sec.append(checkField("Hacer una copia (deja el original)", f.copy, (v) => (f.copy = v)));
+      sec.append(h("div", { class: "seg-btns" },
+        h("button", { class: `btn small ${gizmoMode === "translate" ? "on" : ""}`, onclick: () => { gizmoMode = "translate"; renderGizmo(); renderProps(); } }, "✥ Flechas: mover"),
+        h("button", { class: `btn small ${gizmoMode === "rotate" ? "on" : ""}`, onclick: () => { gizmoMode = "rotate"; renderGizmo(); renderProps(); } }, "⟳ Flechas: girar en Z"),
+      ));
+      sec.append(h("div", { class: "empty" }, "Arrastra las flechas en la vista 3D, o escribe los números."));
+      sec.append(h("h3", { class: "mt" }, "Mover (mm)"));
+      sec.append(exprField("X", () => f.dx, (v) => (f.dx = v), k("dx")));
+      sec.append(exprField("Y", () => f.dy, (v) => (f.dy = v), k("dy")));
+      sec.append(exprField("Z", () => f.dz, (v) => (f.dz = v), k("dz")));
+      sec.append(h("h3", { class: "mt" }, "Girar (°, sobre su centro)"));
+      sec.append(exprField("En X", () => f.rx, (v) => (f.rx = v), k("rx")));
+      sec.append(exprField("En Y", () => f.ry, (v) => (f.ry = v), k("ry")));
+      sec.append(exprField("En Z", () => f.rz, (v) => (f.rz = v), k("rz")));
+      sec.append(h("h3", { class: "mt" }, "Escalar"));
+      sec.append(exprField("Escala", () => f.scale, (v) => (f.scale = v), k("scale"), { hint: "1 = igual · 2 = el doble · 0,5 = la mitad" }));
+      break;
+    }
+    case "combine": {
+      const before = build?.bodiesBefore[f.id] ?? [];
+      sec.append(selectField("Operación", f.op, [["add", "Sumar (unir)"], ["cut", "Restar"], ["intersect", "Intersecar (lo común)"]], (v) => (f.op = v as CombineFeature["op"])));
+      sec.append(selectField("Se queda en", f.target, [["", "Elige un cuerpo…"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => { f.target = v; f.tools = f.tools.filter((t) => t !== v); }));
+      sec.append(h("h3", { class: "mt" }, f.op === "cut" ? "Cuerpos que restar" : "Cuerpos que combinar"));
+      if (before.length < 2) sec.append(h("div", { class: "empty" }, "Hacen falta al menos dos cuerpos (usa «Cuerpo nuevo» al crearlos)."));
+      for (const b of before) {
+        if (b.id === f.target) continue;
+        sec.append(checkField(b.name, f.tools.includes(b.id), (v) => { f.tools = v ? [...f.tools, b.id] : f.tools.filter((t) => t !== b.id); }));
+      }
+      sec.append(checkField("Conservar los cuerpos usados", f.keep, (v) => (f.keep = v)));
+      break;
+    }
     case "gear": {
       sec.append(exprField("Dientes", () => f.teeth, (v) => (f.teeth = v), k("teeth")));
       sec.append(exprField("Módulo", () => f.module, (v) => (f.module = v), k("module"), { hint: "tamaño del diente; dos ruedas engranan si tienen el mismo" }));
@@ -1120,6 +1160,8 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
     h("button", { class: "btn small", title: "Traer un dibujo de Inkscape, Illustrator, Figma…", onclick: () => $("#filesvg").click() }, "Importar SVG…"),
   ));
 
+  renderImageFields(sec, f);
+
   if (f.constraints?.length) {
     sec.append(h("div", { class: "msg info" }, `Restricciones: ${f.constraints.length}. Clic en su símbolo del dibujo para quitar una.`,
       " ", h("button", { class: "btn small", onclick: () => { delete f.constraints; changed(true, true); } }, "Quitar todas")));
@@ -1207,6 +1249,19 @@ function renderSketchBar() {
         renderSketchBar();
       } }, `${CONSTRAINT_GLYPH[kd]} ${CONSTRAINT_NAME[kd]}`));
     }
+  }
+  // redondear, desfase y quitar tramo, sobre lo elegido
+  if (sketcher.tool === "select" && (sketcher.selected || n)) {
+    bar.append(h("span", { class: "sep" }));
+    const amt = h("input", { class: "sk-amount", value: sketchAmount, inputmode: "decimal", title: "Medida (mm) para redondear o desfasar" }) as HTMLInputElement;
+    amt.addEventListener("input", () => (sketchAmount = amt.value));
+    const num = () => { try { return evaluate(amt.value.replace(",", "."), resolved.vars); } catch { return NaN; } };
+    const run = (fn: () => string | null) => { const err = fn(); if (err) toast(err); renderSketchBar(); };
+    bar.append(amt,
+      h("button", { class: "btn small", title: n === 2 ? "Redondea la esquina entre los dos tramos" : "Redondea todas las esquinas del contorno", onclick: () => run(() => sketcher.filletSelection(num())) }, n === 2 ? "◜ Redondear esquina" : "◜ Redondear"),
+      h("button", { class: "btn small", title: "Copia paralela del contorno (negativo = hacia dentro)", onclick: () => run(() => sketcher.offsetSelected(num())) }, "⧈ Desfase"),
+    );
+    if (n === 1 || sketcher.selSeg !== null) bar.append(h("button", { class: "btn small", title: "Quita el tramo elegido", onclick: () => run(() => sketcher.removeSelectedSegment()) }, "✂ Quitar tramo"));
   }
   const snap = h("button", { class: `btn small ${sketcher.snapOn ? "on" : ""}`, title: "Ajustar a la rejilla (Mayús lo suspende)", onclick: () => { sketcher.snapOn = !sketcher.snapOn; renderSketchBar(); } }, "# Rejilla");
   bar.append(snap, h("button", { class: "btn small", onclick: () => sketcher.fitView() }, "Encajar"));
@@ -1365,9 +1420,122 @@ function renderMarks() {
     pins,
     plane: pickingFace ? null : plane,
   });
+  renderGizmo();
+}
+
+// ---------- flechas para mover/girar ----------
+let gizmoMode: "translate" | "rotate" = "translate";
+/** suma un número a una medida: si es un número suelto, lo cambia; si es una cuenta, le añade «+ n» */
+function addTo(expr: string, delta: number): string {
+  if (Math.abs(delta) < 1e-9) return expr;
+  if (/^\s*-?(\d+\.?\d*|\.\d+)\s*$/.test(expr)) return fmt(Number(expr) + delta);
+  return `${expr} ${delta < 0 ? "-" : "+"} ${fmt(Math.abs(delta))}`;
+}
+function renderGizmo() {
+  const f = doc.features.find((x) => x.id === active);
+  if (f?.type !== "transform" || !build) { viewport.setGizmo(null); return; }
+  const before = build.bodiesBefore[f.id] ?? [];
+  const body = f.copy ? f.id : f.body || before[before.length - 1]?.id || "";
+  const center = body ? viewport.bodyCenter(body) : null;
+  if (!center) { viewport.setGizmo(null); return; }
+  viewport.setGizmo({
+    body, center, mode: gizmoMode,
+    onDone: (d) => {
+      f.dx = addTo(f.dx, d.dx); f.dy = addTo(f.dy, d.dy); f.dz = addTo(f.dz, d.dz); f.rz = addTo(f.rz, d.rz);
+      changed(true);
+      renderProps();
+    },
+  });
 }
 
 /** Dibuja en 3D los bocetos que aún no se han usado (y el activo) */
+// ---------- imágenes de referencia ----------
+const imageUrls = new Map<string, Promise<string | null>>();
+function imageUrl(id: string): Promise<string | null> {
+  let u = imageUrls.get(id);
+  if (!u) {
+    u = files.get(id).then((st) => (st ? URL.createObjectURL(new Blob([st.data])) : null));
+    imageUrls.set(id, u);
+  }
+  return u;
+}
+
+let imagesSeq = 0;
+/** Pone las imágenes en el editor de boceto y en la vista 3D */
+async function syncImages() {
+  const my = ++imagesSeq;
+  const f = doc.features.find((x) => x.id === active);
+  const list: Parameters<typeof viewport.setRefImages>[0] = [];
+  let sk: Parameters<typeof sketcher.setImage>[0] = null;
+  for (const rf of resolved.features) {
+    if (rf.type !== "sketch" || rf.off || !rf.image) continue;
+    const im = rf.image;
+    const url = await imageUrl(im.file);
+    if (my !== imagesSeq) return;
+    if (!url) continue;
+    const geo = { url, x: im.x, y: im.y, w: im.w, h: im.w * im.aspect, opacity: im.opacity };
+    if (f?.id === rf.id) sk = geo;
+    if (im.show3d !== false && f?.id !== rf.id) list.push({ ...geo, basis: planeBasis(rf.plane as never), opacity: Math.min(im.opacity, 0.6) });
+  }
+  sketcher.setImage(sk);
+  viewport.setRefImages(list);
+}
+
+function renderImageFields(sec: HTMLElement, f: SketchFeature) {
+  const box = h("div", { class: "subsection" });
+  sec.append(box);
+  box.append(h("h3", {}, "Imagen de referencia", f.image ? h("button", { class: "btn small", onclick: () => { delete f.image; changed(true, true); } }, "Quitar") : null));
+  if (!f.image) {
+    box.append(h("button", { class: "btn small", onclick: () => { imageTarget = f.id; $("#fileimg").click(); } }, "🖼 Poner una imagen de fondo…"));
+    box.append(h("div", { class: "empty" }, "Una foto o un plano para calcar encima. Pon su ancho real en mm para que la escala cuadre."));
+    return;
+  }
+  const im = f.image;
+  const num = (label: string, get: () => number, set: (v: number) => void, hint?: string) => {
+    const i = h("input", { value: fmt(get()), inputmode: "decimal" }) as HTMLInputElement;
+    i.addEventListener("change", () => {
+      const v = Number(i.value.replace(",", "."));
+      if (!Number.isFinite(v)) { i.classList.add("bad"); return; }
+      i.classList.remove("bad");
+      set(v); changed(true);
+    });
+    return h("div", { class: "field" }, h("label", {}, label), i, hint ? h("div", { class: "val" }, hint) : null);
+  };
+  box.append(
+    num("Ancho real", () => im.w, (v) => { if (v > 0) im.w = v; }, "mm que mide la imagen de lado a lado"),
+    num("Esquina X", () => im.x, (v) => (im.x = v)),
+    num("Esquina Y", () => im.y, (v) => (im.y = v)),
+    h("div", { class: "seg-btns" }, h("button", { class: "btn small", onclick: () => { im.x = -im.w / 2; im.y = -(im.w * im.aspect) / 2; changed(true, true); } }, "Centrar en el origen")),
+  );
+  const op = h("input", { type: "range", min: "0.1", max: "1", step: "0.05", value: String(im.opacity) }) as HTMLInputElement;
+  op.addEventListener("input", () => { im.opacity = Number(op.value); void syncImages(); });
+  op.addEventListener("change", () => changed(true));
+  box.append(h("div", { class: "field" }, h("label", {}, "Opacidad"), op));
+  box.append(checkField("Verla también en la vista 3D", im.show3d !== false, (v) => (im.show3d = v)));
+}
+let imageTarget = "";
+$("#fileimg").addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  const f = doc.features.find((x) => x.id === imageTarget);
+  if (!file || f?.type !== "sketch") return;
+  try {
+    const data = await file.arrayBuffer();
+    const bmp = await createImageBitmap(new Blob([data]));
+    const aspect = bmp.height / bmp.width;
+    bmp.close();
+    const id = await fileId(data);
+    await files.put(id, { name: file.name, format: "image", data });
+    const w = 100;
+    f.image = { file: id, x: -w / 2, y: (-w * aspect) / 2, w, aspect, opacity: 0.5, show3d: true };
+    changed(true, true);
+    toast("Imagen puesta. Ajusta su ancho real en mm.");
+  } catch {
+    toast("No se pudo leer esa imagen");
+  }
+});
+
 function renderSketchLines() {
   const used = new Set(doc.features.flatMap((f) => (f.off ? [] : sketchUses(f))));
   const out: { pts: Vec3[][]; active: boolean }[] = [];
@@ -1381,6 +1549,7 @@ function renderSketchLines() {
   }
   viewport.setSketchLines(out);
   renderMarks();
+  void syncImages();
 }
 
 // ======================================================================
@@ -1538,9 +1707,10 @@ function openDialog() {
 async function saveProjectFile() {
   const out: Doc = JSON.parse(JSON.stringify(doc));
   for (const f of doc.features) {
-    if (f.type !== "import" || !f.file || out.files?.[f.file]) continue;
-    const st = await files.get(f.file);
-    if (st) (out.files ??= {})[f.file] = { name: st.name, format: st.format, data: toBase64(st.data) };
+    const fid = f.type === "import" ? f.file : f.type === "sketch" ? f.image?.file : undefined;
+    if (!fid || out.files?.[fid]) continue;
+    const st = await files.get(fid);
+    if (st) (out.files ??= {})[fid] = { name: st.name, format: st.format, data: toBase64(st.data) };
   }
   download(JSON.stringify(out, null, 2), `${safeName()}.geometria.json`, "application/json");
 }
@@ -1565,7 +1735,7 @@ $("#file").addEventListener("change", async (e) => {
     if (!isDoc(d)) throw new Error();
     // los archivos importados que trae dentro se guardan aparte
     for (const [id, f] of Object.entries(d.files ?? {})) {
-      if (f && (f.format === "step" || f.format === "stl") && typeof f.data === "string") await files.put(id, { name: String(f.name), format: f.format, data: fromBase64(f.data) });
+      if (f && (f.format === "step" || f.format === "stl" || f.format === "image") && typeof f.data === "string") await files.put(id, { name: String(f.name), format: f.format, data: fromBase64(f.data) });
     }
     delete d.files;
     setDoc(d, uid());
