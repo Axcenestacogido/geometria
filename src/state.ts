@@ -55,6 +55,8 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   gear: "Engranaje",
   transform: "Mover / girar",
   joint: "Unión",
+  catalog: "Pieza de catálogo",
+  split: "Partir",
   combine: "Combinar",
   spring: "Muelle",
   fillet: "Redondeo",
@@ -72,7 +74,7 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
 };
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
-  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", joint: "⚭", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
+  sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", joint: "⚭", catalog: "⚙︎", split: "✂", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
   shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", layflat: "⤓", component: "❖",
 };
 
@@ -109,6 +111,10 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, body: "", dx: "0", dy: "0", dz: "0", rx: "0", ry: "0", rz: "0", scale: "1", copy: false };
     case "combine":
       return { id, name, type, op: "add", target: "", tools: [], keep: false };
+    case "catalog":
+      return { id, name, type, part: "608", x: "0", y: "0", z: "0", rx: "0", rz: "0", length: "100", fit: String(myFit()), op: hasBody ? "cut" : "new" };
+    case "split":
+      return { id, name, type, body: "", axis: "x", at: "0", pins: "loose", pinD: "5", pinL: "12", count: "2", fit: String(myFit()), gap: "10" };
     case "joint":
       return { id, name, type, kind: "hinge", bodies: [], axis: "x", x: "0", y: "0", z: "0", value: "0", min: "0", max: "90" };
     case "gear":
@@ -133,9 +139,9 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       };
     }
     case "hole":
-      return { id, name, type, kind: "clearance", size: "M3", depth: "10", through: true, fit: "0.2", points: [] };
+      return { id, name, type, kind: "clearance", size: "M3", depth: "10", through: true, fit: String(myFit()), points: [] };
     case "rod":
-      return { id, name, type, size: "M8", length: "15", fit: "0.2", points: [] };
+      return { id, name, type, size: "M8", length: "15", fit: String(myFit()), points: [] };
     case "text":
       return { id, name, type, text: "Hola", font: "sans-bold", size: "8", depth: hasBody ? "0.6" : "2", angle: "0", points: [], op: hasBody ? "cut" : "new" };
     case "sweep": {
@@ -164,6 +170,8 @@ const NUM_FIELDS: Record<string, string[]> = {
   transform: ["dx", "dy", "dz", "rx", "ry", "rz", "scale"],
   combine: [],
   joint: ["x", "y", "z", "value", "min", "max"],
+  catalog: ["x", "y", "z", "rx", "rz", "length", "fit"],
+  split: ["at", "pinD", "pinL", "count", "fit", "gap"],
   gear: ["x", "y", "z", "module", "teeth", "thickness", "bore", "fit", "angle"],
   spring: ["x", "y", "z", "diameter", "wire", "pitch", "turns"],
   fillet: ["size"],
@@ -278,6 +286,17 @@ export class History {
   reset(s: string) { this.past = []; this.future = []; this.current = s; }
   get canUndo() { return this.past.length > 0; }
   get canRedo() { return this.future.length > 0; }
+}
+
+// ---------- Tu holgura (la que salió bien en la prueba de holguras) ----------
+
+const KEY_FIT = "geometria:holgura";
+/** Holgura de encaje de tu impresora (mm, en diámetro). Por defecto 0,2. */
+export function myFit(): number {
+  try { const v = Number(localStorage.getItem(KEY_FIT)); return v > 0 && v < 2 ? v : 0.2; } catch { return 0.2; }
+}
+export function setMyFit(v: number) {
+  try { localStorage.setItem(KEY_FIT, String(v)); } catch { /* sin almacenamiento */ }
 }
 
 // ---------- Guardado en el navegador ----------

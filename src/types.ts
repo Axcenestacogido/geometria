@@ -295,6 +295,32 @@ export interface JointFeature extends FeatureBase {
   value: Expr; min: Expr; max: Expr;
 }
 
+/** Pieza comprada de catálogo (rodamiento, imán, inserto…), o el hueco para meterla */
+export interface CatalogFeature extends SolidOpBase {
+  type: "catalog";
+  part: string;
+  x: Expr; y: Expr; z: Expr;
+  /** giro sobre X (180 = boca abajo) y sobre Z */
+  rx: Expr; rz: Expr;
+  /** solo perfiles: largo */
+  length: Expr;
+  /** holgura del hueco (diámetro) */
+  fit: Expr;
+}
+
+/** Parte un cuerpo en dos por un plano, con espigas para unir las partes */
+export interface SplitFeature extends FeatureBase {
+  type: "split";
+  body: string;
+  axis: "x" | "y" | "z";
+  /** coordenada del corte (mm) */
+  at: Expr;
+  pins: "none" | "loose" | "fixed";
+  pinD: Expr; pinL: Expr; count: Expr; fit: Expr;
+  /** separación entre las partes para verlas (mm) */
+  gap: Expr;
+}
+
 /** Suma, resta o interseca cuerpos que ya existen */
 export interface CombineFeature extends FeatureBase {
   type: "combine";
@@ -333,6 +359,8 @@ export type Feature =
   | SpringFeature
   | TransformFeature
   | JointFeature
+  | CatalogFeature
+  | SplitFeature
   | CombineFeature
   | EdgeFeature
   | ShellFeature
