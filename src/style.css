@@ -431,3 +431,9 @@ dialog:has(.keys) { width: min(860px, calc(100vw - 32px)); }
 .tree li.picked { background: var(--accent-soft); outline: 1px dashed var(--accent); }
 .tree li.grp-bar { flex-wrap: wrap; cursor: default; background: var(--panel-2); }
 .tree .grp-name { flex: 1; min-width: 0; font: inherit; padding: 2px 6px; border: 1px solid var(--accent); border-radius: 4px; background: var(--panel); color: var(--text); }
+
+/* guardado en el servidor */
+#st-cloud { margin-right: 14px; }
+#st-cloud.offline { color: var(--danger); }
+#st-cloud.on { color: var(--muted); }
+.cloud-up { display: flex; align-items: center; gap: 10px; justify-content: space-between; margin-bottom: 8px; }

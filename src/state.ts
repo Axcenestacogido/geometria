@@ -370,6 +370,21 @@ export const storage = {
       localStorage.setItem(KEY_LAST, id);
     }, undefined);
   },
+  /** Guarda una pieza que llega del servidor, con su fecha, sin cambiar cuál es la última abierta */
+  put(id: string, doc: Doc, updated: number) {
+    safe(() => {
+      localStorage.setItem(KEY_DOC(id), JSON.stringify(doc));
+      const list = storage.list().filter((m) => m.id !== id);
+      list.push({ id, name: doc.name, updated });
+      localStorage.setItem(KEY_LIST, JSON.stringify(list));
+    }, undefined);
+  },
+  meta(id: string): SavedMeta | undefined {
+    return storage.list().find((m) => m.id === id);
+  },
+  setVersions(id: string, list: Version[]) {
+    safe(() => localStorage.setItem(KEY_VERS(id), JSON.stringify(list)), undefined);
+  },
   remove(id: string) {
     safe(() => {
       localStorage.removeItem(KEY_DOC(id));
