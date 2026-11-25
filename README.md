@@ -8,7 +8,7 @@ Todo se calcula **en tu navegador**. El servidor solo entrega la página: no hay
 ni subidas. Las piezas se guardan en el navegador del equipo donde trabajas (y puedes
 descargarlas como `.json` para pasarlas a otro).
 
-## Qué hace (v1)
+## Qué hace
 
 | Paso | Qué hace |
 |---|---|
@@ -18,11 +18,24 @@ descargarlas como `.json` para pasarlas a otro).
 | **Caja, Cilindro, Esfera** | Formas básicas con medidas y posición. |
 | **Sumar / Restar / Intersecar** | Cada sólido puede crear un cuerpo nuevo o combinarse con uno existente. Al restar desde una cara, va hacia dentro de la pieza. |
 | **Redondeo y Chaflán** | Eliges las aristas con un clic en la vista 3D. |
+| **Vaciado** | Convierte el sólido en una carcasa; eliges con un clic las caras que quedan abiertas. |
+| **Patrón** | Repite un paso en fila, rejilla o círculo, o lo refleja (simetría). |
+| **Agujeros** | Tornillería métrica M2–M20: de paso, avellanado, con caja, para inserto térmico, directo al plástico, hueco para tuerca y rosca hembra. Con holgura para la impresora. |
+| **Varilla roscada** | Rosca macho que sale de una cara. |
+| **Barrido** | Un perfil que recorre un camino (tubos, asas, aros). El camino se dibuja con la herramienta *Camino*. |
+| **Transición** | Pasa suavemente de la forma de un boceto a la de otro (de cuadrado a círculo…). |
+| **Texto** | Letras en relieve o grabadas sobre una cara (tipografías libres Inter y JetBrains Mono). |
+| **Importar** | Trae una pieza STEP o STL de otro programa para sumarla, restarla o modificarla. Los archivos se guardan en el navegador y van dentro del proyecto `.json` al descargarlo. |
+| **Importar SVG** | Dentro de un boceto: trae un dibujo (logo, silueta…) de Inkscape, Illustrator o Figma, escalado al ancho que digas. |
+| **Restricciones** | En el boceto, elige un tramo (o dos con `Mayús`+clic) y ponle Horizontal, Vertical, Igual largo, Paralelas o Perpendiculares. Se mantienen al mover puntos. |
+| **Medir** | Distancia entre vértices, aristas o caras, con X, Y, Z por separado. |
+| **Tu pieza** | Tamaño, volumen, peso en PLA/PETG y metros de filamento. |
 | **Variables** | `grosor = 3` y luego escribes `grosor * 2` en cualquier medida. Admite `+ - * / ^ ( )`, `sqrt`, `sin`, `cos`, `tan` (en grados), `abs`, `round` y `pi`. |
 | **Exportar** | **3MF** (Bambu Studio, Orca, Prusa; guarda unidades y piezas separadas), **STL** y **STEP** (Rhino, Fusion, FreeCAD). |
 
 Además: deshacer/rehacer (`Ctrl+Z` / `Ctrl+Y`), apagar un paso sin borrarlo, reordenar pasos,
-varias piezas guardadas, tema claro y oscuro.
+varias piezas guardadas, tema claro y oscuro, vista 3D en perspectiva o isométrica (las vistas
+Arriba, Frente, etc. son siempre isométricas).
 
 ### Atajos en el boceto
 
@@ -33,6 +46,7 @@ varias piezas guardadas, tema claro y oscuro.
 | `R` | Rectángulo |
 | `C` | Círculo |
 | `P` | Polígono |
+| `W` | Camino: línea abierta para un barrido (`Intro` para terminar) |
 | `Supr` | Borrar el perfil elegido |
 | `Esc` | Cancelar / salir |
 | Doble clic en una cota | Escribir la medida exacta |

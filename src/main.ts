@@ -2,7 +2,11 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
+  TextFeature, TextFont, SweepFeature, LoftFeature, ImportFeature,
 } from "./types";
+import { files, fileId, toBase64, fromBase64 } from "./files";
+import { readSvg, svgToProfiles } from "./svgimport";
+import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
 import { Viewport, type ViewName } from "./viewport";
 import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
@@ -104,12 +108,14 @@ $("#app").innerHTML = `
 <footer class="status"><span id="st-engine">Motor: cargando</span><span id="st-msg"></span><span class="spacer"></span><span>Unidades: mm</span></footer>
 <dialog id="dlg"></dialog>
 <input type="file" id="file" accept=".json,application/json" hidden />
+<input type="file" id="file3d" accept=".step,.stp,.stl" hidden />
+<input type="file" id="filesvg" accept=".svg,image/svg+xml" hidden />
 `;
 
 const viewport = new Viewport($("#view"));
 const sketcher = new SketchEditor($("#sketch"), {
   onChange: (commit) => changed(commit),
-  onSelect: () => renderProps(),
+  onSelect: () => { renderProps(); renderSketchBar(); },
   ev: (e) => evaluate(e, resolved.vars),
 });
 
@@ -149,6 +155,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
     const st = $("#st-msg");
     st.textContent = nErr ? `${nErr} aviso${nErr > 1 ? "s" : ""}: revisa los pasos en rojo` : `${m.bodies.length} cuerpo${m.bodies.length === 1 ? "" : "s"}`;
     st.className = nErr ? "bad" : "";
+  } else if (m.kind === "file") {
+    if (m.error) toast("No se pudo leer el archivo: " + m.error);
+    else if (m.triangles) toast(`Archivo leído (${m.triangles} triángulos)`);
   } else if (m.kind === "exported") {
     exportWaiters.get(m.seq)?.(m);
     exportWaiters.delete(m.seq);
@@ -156,8 +165,20 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
 };
 
 /** Pasos que, mientras los editas, muestran la pieza como estaba antes de ellos */
-const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod"]);
-const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod"]);
+const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod", "text"]);
+const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text"]);
+
+/** Archivos importados que el motor ya tiene */
+const sentFiles = new Set<string>();
+async function sendFiles() {
+  for (const f of doc.features) {
+    if (f.type !== "import" || !f.file || sentFiles.has(f.file)) continue;
+    sentFiles.add(f.file);
+    const st = await files.get(f.file);
+    if (!st) { sentFiles.delete(f.file); continue; }
+    worker.postMessage({ kind: "file", id: f.file, format: st.format, data: st.data });
+  }
+}
 
 let rebuildTimer = 0;
 function rebuild() {
@@ -166,6 +187,7 @@ function rebuild() {
     resolved = resolveDoc(doc);
     renderSketchLines();
     if (!engineReady) return;
+    void sendFiles();
     const f = doc.features.find((x) => x.id === active);
     // al editar un boceto o un redondeo se ve la pieza como estaba antes de ese paso
     const upTo = f && BEFORE_TYPES.has(f.type) ? f.id : undefined;
@@ -187,13 +209,21 @@ function changed(commit = true, structural = false) {
     saveTimer = window.setTimeout(() => storage.save(docId, doc), 300);
     renderUndo();
   }
-  if (active && doc.features.find((f) => f.id === active)?.type === "sketch") sketcher.render();
+  const af = doc.features.find((f) => f.id === active);
+  if (af?.type === "sketch") {
+    // cualquier cambio (también desde el panel) vuelve a cumplir las restricciones
+    if (af.constraints?.length && !solveSketch(af, (e) => evaluate(e, resolved.vars))) toast("Hay restricciones que no se pueden cumplir: quita alguna (clic en su símbolo)");
+    sketcher.render();
+    // al soltar un punto, que el panel muestre los números nuevos (si no estás escribiendo en él)
+    if (commit && !$("#props").contains(document.activeElement)) renderProps();
+  }
 }
 
 function setDoc(d: Doc, id = docId, resetHistory = true) {
   doc = d;
   docId = id;
   active = null;
+  resolved = resolveDoc(doc);
   sketcher.close();
   if (resetHistory) history.reset(JSON.stringify(doc));
   storage.save(docId, doc);
@@ -206,6 +236,7 @@ function undoRedo(which: "undo" | "redo") {
   const s = which === "undo" ? history.undo() : history.redo();
   if (!s) return;
   doc = JSON.parse(s);
+  resolved = resolveDoc(doc);
   if (active && !doc.features.some((f) => f.id === active)) active = null;
   storage.save(docId, doc);
   renderAll();
@@ -225,8 +256,17 @@ const ADD: { type: Feature["type"]; key?: string }[] = [
   { type: "sketch" }, { type: "extrude" }, { type: "revolve" }, { type: "fillet" },
   { type: "box" }, { type: "cylinder" }, { type: "sphere" }, { type: "chamfer" },
   { type: "shell" }, { type: "pattern" }, { type: "hole" }, { type: "rod" },
+  { type: "sweep" }, { type: "loft" }, { type: "text" }, { type: "import" },
 ];
-const ADD_LABEL: Partial<Record<Feature["type"], string>> = { extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla" };
+const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
+  extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
+};
+const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
+  sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
+  loft: "Transición suave entre dos o más bocetos (de cuadrado a círculo…)",
+  text: "Letras en relieve o grabadas",
+  import: "Traer una pieza STEP o STL de otro programa",
+};
 
 function renderTools() {
   const box = $("#tools");
@@ -234,13 +274,13 @@ function renderTools() {
   const hasSketch = doc.features.some((f) => f.type === "sketch");
   const hasBody = !!build?.bodies.length;
   for (const t of ADD) {
-    const needSketch = t.type === "extrude" || t.type === "revolve";
+    const needSketch = t.type === "extrude" || t.type === "revolve" || t.type === "sweep" || t.type === "loft";
     const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod"].includes(t.type);
     box.append(h("button", {
       class: "tool",
       disabled: (needSketch && !hasSketch) || (needBody && !hasBody),
-      title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : "",
-      onclick: () => addFeature(t.type),
+      title: needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : ADD_TITLE[t.type] ?? "",
+      onclick: () => (t.type === "import" ? $("#file3d").click() : addFeature(t.type)),
     }, h("b", {}, FEATURE_ICON[t.type]), ADD_LABEL[t.type] ?? FEATURE_LABEL[t.type]));
   }
 }
@@ -307,11 +347,19 @@ function move(i: number, d: number) {
 }
 
 function removeFeature(id: string) {
-  const users = doc.features.filter((f) => (f.type === "extrude" || f.type === "revolve") && f.sketch === id);
+  const users = doc.features.filter((f) => sketchUses(f).includes(id));
   if (users.length && !confirmInline(`Este boceto lo usa «${users.map((u) => u.name).join(", ")}». ¿Borrarlo igualmente?`)) return;
   doc.features = doc.features.filter((f) => f.id !== id);
   if (active === id) setActive(null);
   changed(true, true);
+}
+
+/** Bocetos que usa un paso */
+function sketchUses(f: Feature): string[] {
+  if (f.type === "extrude" || f.type === "revolve") return [f.sketch];
+  if (f.type === "sweep") return [f.sketch, f.path];
+  if (f.type === "loft") return f.sketches;
+  return [];
 }
 
 // confirm() del navegador es suficiente aquí y se puede deshacer con Ctrl+Z
@@ -349,7 +397,7 @@ function renameVarUses(old: string, nu: string) {
     if (Array.isArray(o)) return o.map(walk);
     if (o && typeof o === "object") {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(o)) out[k] = k === "id" || k === "name" || k === "type" || k === "sketch" || k === "target" ? v : walk(v);
+      for (const [k, v] of Object.entries(o)) out[k] = ["id", "name", "type", "sketch", "target", "path", "sketches", "text", "file", "fileName"].includes(k) ? v : walk(v);
       return out;
     }
     return o;
@@ -537,6 +585,10 @@ function renderProps() {
     case "pattern": renderPatternProps(sec, f); break;
     case "hole":
     case "rod": renderHoleProps(sec, f); break;
+    case "text": renderTextProps(sec, f); break;
+    case "sweep": renderSweepProps(sec, f); break;
+    case "loft": renderLoftProps(sec, f); break;
+    case "import": renderImportProps(sec, f); break;
   }
   sec.append(h("div", { class: "actions" },
     h("button", { class: "btn primary", onclick: () => setActive(null) }, "Hecho"),
@@ -546,7 +598,7 @@ function renderProps() {
 function renderPatternProps(sec: HTMLElement, f: PatternFeature) {
   const k = (field: string) => `${f.id}:${field}`;
   const idx = doc.features.indexOf(f);
-  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "pattern"].includes(x.type));
+  const sources = doc.features.slice(0, idx).filter((x) => ["extrude", "revolve", "box", "cylinder", "sphere", "hole", "rod", "pattern", "text", "sweep", "loft", "import"].includes(x.type));
   sec.append(selectField("Tipo", f.kind, [["linear", "En fila / rejilla"], ["circular", "En círculo"], ["mirror", "Simetría (espejo)"]], (v) => (f.kind = v as PatternKind)));
   sec.append(selectField("Repetir", f.source, [["", "El cuerpo entero"], ...sources.map((s) => [s.id, s.name] as [string, string])], (v) => (f.source = v)));
   const axes: [string, string][] = [["x", "X (rojo)"], ["y", "Y (verde)"], ["z", "Z (azul)"]];
@@ -618,6 +670,143 @@ function renderHoleProps(sec: HTMLElement, f: HoleFeature | RodFeature) {
   });
 }
 
+function sketchOptions(f: Feature): [string, string][] {
+  return doc.features.slice(0, doc.features.indexOf(f)).filter((x): x is SketchFeature => x.type === "sketch").map((s) => [s.id, s.name]);
+}
+
+function renderTextProps(sec: HTMLElement, f: TextFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  const ta = h("textarea", { rows: "2", spellcheck: "false" }) as HTMLTextAreaElement;
+  ta.value = f.text;
+  ta.addEventListener("input", () => { f.text = ta.value; changed(false); });
+  ta.addEventListener("change", () => changed(true));
+  sec.append(h("div", { class: "field" }, h("label", {}, "Texto"), ta));
+  const fonts: [TextFont, string][] = [["sans-bold", "Inter negrita (recomendada)"], ["sans", "Inter normal"], ["mono", "JetBrains Mono (letras del mismo ancho)"]];
+  sec.append(selectField("Letra", f.font, fonts, (v) => (f.font = v as TextFont)));
+  sec.append(exprField("Alto de letra", () => f.size, (v) => (f.size = v), k("size")));
+  sec.append(exprField(f.op === "cut" ? "Profundidad" : "Grosor", () => f.depth, (v) => (f.depth = v), k("depth")));
+  sec.append(exprField("Giro", () => f.angle, (v) => (f.angle = v), k("angle"), { unit: "°" }));
+  sec.append(selectField("Resultado", f.op, [["cut", "Grabado (restar)"], ["add", "En relieve (sumar)"], ["new", "Cuerpo nuevo"]], (v) => (f.op = v as never)));
+  const before = build?.bodiesBefore[f.id] ?? [];
+  if (f.op !== "new" && before.length > 1) sec.append(selectField("Sobre", f.target ?? "", [["", "El último cuerpo"], ...before.map((b) => [b.id, b.name] as [string, string])], (v) => (f.target = v || undefined)));
+  const p = f.points[f.points.length - 1];
+  sec.append(h("h3", { class: "mt" }, "Posición"));
+  if (!p) sec.append(h("div", { class: "msg info" }, "Haz clic en una cara de la pieza para poner ahí el centro del texto. Sin clic, va en el suelo, en el origen."));
+  else {
+    sec.append(h("div", { class: "field" }, h("label", {}, "Centro (X Y Z)"),
+      h("div", { class: "row-pt3" },
+        exprInline(() => p.x, (v) => (p.x = v)),
+        exprInline(() => p.y, (v) => (p.y = v)),
+        exprInline(() => p.z, (v) => (p.z = v)),
+        h("button", { class: "btn small", title: "Quitar", onclick: () => { f.points = []; changed(true, true); } }, "✕"),
+      )));
+  }
+  sec.append(h("div", { class: "empty mt" }, "Para imprimir bien: letras de 5 mm o más y grabado de 0,4–1 mm. Otro clic en una cara mueve el texto."));
+}
+
+function renderSweepProps(sec: HTMLElement, f: SweepFeature) {
+  const opts = sketchOptions(f);
+  sec.append(selectField("Forma (perfil)", f.sketch, [["", "— elige —"], ...opts], (v) => (f.sketch = v)));
+  sec.append(selectField("Camino", f.path, [["", "— elige —"], ...opts], (v) => (f.path = v)));
+  sec.append(h("div", { class: "msg info" },
+    "La forma se coloca al principio del camino, de pie, centrada en el origen (0, 0) de su boceto. ",
+    "Para el camino usa la herramienta ", h("b", {}, "〰 Camino"), " del boceto (línea abierta), o un contorno cerrado para hacer un aro."));
+  sec.append(...opFields(f));
+}
+
+function renderLoftProps(sec: HTMLElement, f: LoftFeature) {
+  const opts = sketchOptions(f);
+  sec.append(h("div", { class: "msg info" }, "Elige los bocetos en orden: la pieza pasa de la forma del primero a la del último. Cada boceto, un solo contorno sin agujeros, en planos distintos (usa «Desfase»)."));
+  f.sketches.forEach((id, i) => {
+    const row = selectField(`Boceto ${i + 1}`, id, [["", "— elige —"], ...opts], (v) => (f.sketches[i] = v));
+    if (f.sketches.length > 2) row.append(h("button", { class: "btn small", onclick: () => { f.sketches.splice(i, 1); changed(true, true); } }, "Quitar"));
+    sec.append(row);
+  });
+  sec.append(h("button", { class: "btn small", onclick: () => { f.sketches.push(""); changed(true, true); } }, "+ Otro boceto"));
+  sec.append(checkField("Caras rectas entre bocetos", f.ruled, (v) => (f.ruled = v)));
+  sec.append(...opFields(f));
+}
+
+function renderImportProps(sec: HTMLElement, f: ImportFeature) {
+  const k = (field: string) => `${f.id}:${field}`;
+  sec.append(h("div", { class: "msg info" }, `Archivo: ${f.fileName || "ninguno"} (${f.format.toUpperCase()})`));
+  sec.append(h("button", { class: "btn small", onclick: () => { replacingImport = f.id; $("#file3d").click(); } }, "Cambiar archivo…"));
+  sec.append(exprField("Escala", () => f.scale, (v) => (f.scale = v), k("scale"), { unit: " ×", hint: "1 = tamaño real; 25,4 si viene en pulgadas" }));
+  sec.append(h("h3", { class: "mt" }, "Mover"));
+  sec.append(exprField("X", () => f.x, (v) => (f.x = v), k("x")));
+  sec.append(exprField("Y", () => f.y, (v) => (f.y = v), k("y")));
+  sec.append(exprField("Z", () => f.z, (v) => (f.z = v), k("z")));
+  sec.append(...opFields(f));
+  sec.append(h("div", { class: "empty mt" }, f.format === "stl"
+    ? "Un STL es una malla de triángulos: se puede sumar y restar, pero cada cara es un triángulo y no se pueden redondear sus aristas. Si puedes, usa STEP."
+    : "El STEP conserva las caras reales: puedes redondear, vaciar y hacer agujeros sobre él."));
+}
+
+// SVG → perfiles del boceto activo
+$("#filesvg").addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  const f = doc.features.find((x) => x.id === active);
+  if (!file || f?.type !== "sketch") return;
+  if (file.size > 5 * 1024 * 1024) return toast("El SVG pasa de 5 MB");
+  let shapes;
+  try { shapes = readSvg(await file.text()); } catch (err) { return toast("No se pudo leer el SVG: " + (err as Error).message); }
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const w = h("input", { value: fmt(Math.round(shapes.width * 10) / 10) }) as HTMLInputElement;
+  const go = () => {
+    let width: number;
+    try { width = evaluate(w.value, resolved.vars); } catch { w.classList.add("bad"); return; }
+    if (!(width > 0)) { w.classList.add("bad"); return; }
+    const { profiles, points } = svgToProfiles(shapes, width);
+    f.profiles.push(...profiles);
+    dlg.close();
+    changed(true, true);
+    sketcher.fitView();
+    toast(`${profiles.length} contorno${profiles.length === 1 ? "" : "s"} importado${profiles.length === 1 ? "" : "s"} (${points} puntos)`);
+  };
+  w.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
+  dlg.append(
+    h("h2", {}, "Importar SVG"),
+    h("p", { class: "empty" }, `${file.name}: ${shapes.loops.length} contornos, ${fmtEs(shapes.width)} × ${fmtEs(shapes.height)} mm. Se centra en el origen del boceto. Las curvas se pasan a tramos rectos muy cortos.`),
+    h("div", { class: "field" }, h("label", {}, "Ancho final (mm)"), w),
+    h("div", { class: "t-right" },
+      h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar"), " ",
+      h("button", { class: "btn primary", onclick: go }, "Importar")),
+  );
+  dlg.showModal();
+  w.select();
+});
+
+let replacingImport: string | null = null;
+$("#file3d").addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const ext = file.name.toLowerCase().split(".").pop();
+  const format = ext === "stl" ? "stl" : ext === "step" || ext === "stp" ? "step" : null;
+  if (!format) return toast("Solo STEP (.step, .stp) o STL");
+  if (file.size > 40 * 1024 * 1024) return toast("El archivo pasa de 40 MB: es demasiado grande");
+  const data = await file.arrayBuffer();
+  const id = await fileId(data);
+  try { await files.put(id, { name: file.name, format, data }); } catch { return toast("No se pudo guardar el archivo en este navegador"); }
+  const old = replacingImport ? doc.features.find((x) => x.id === replacingImport) : undefined;
+  replacingImport = null;
+  toast("Leyendo el archivo…");
+  if (old?.type === "import") {
+    Object.assign(old, { file: id, fileName: file.name, format });
+    changed(true, true);
+    return;
+  }
+  const f = newFeature(doc, "import") as ImportFeature;
+  Object.assign(f, { file: id, fileName: file.name, format, name: file.name.replace(/\.[^.]+$/, "") });
+  doc.features.push(f);
+  setActive(f.id);
+  changed(true, true);
+});
+
 /** Solo actualiza el aviso del paso activo (sin rehacer el panel, para no perder lo que escribes) */
 function renderFeatureError() {
   const box = document.getElementById("feat-err");
@@ -635,8 +824,15 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
     if (v !== "face") f.plane = { kind: "std", name: v as StdPlane, offset: f.plane.offset };
   }));
   sec.append(exprField("Desfase", () => f.plane.offset, (v) => (f.plane.offset = v), `${f.id}:offset`, { hint: "separa el plano en su normal" }));
-  sec.append(h("button", { class: "btn small", onclick: startFacePick }, "Dibujar sobre una cara de la pieza…"));
+  sec.append(h("div", { class: "seg-btns" },
+    h("button", { class: "btn small", onclick: startFacePick }, "Dibujar sobre una cara de la pieza…"),
+    h("button", { class: "btn small", title: "Traer un dibujo de Inkscape, Illustrator, Figma…", onclick: () => $("#filesvg").click() }, "Importar SVG…"),
+  ));
 
+  if (f.constraints?.length) {
+    sec.append(h("div", { class: "msg info" }, `Restricciones: ${f.constraints.length}. Clic en su símbolo del dibujo para quitar una.`,
+      " ", h("button", { class: "btn small", onclick: () => { delete f.constraints; changed(true, true); } }, "Quitar todas")));
+  }
   // perfil seleccionado
   const p = f.profiles.find((x) => x.id === sketcher.selected);
   const ps = h("div", { class: "subsection" });
@@ -650,7 +846,9 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
   }
   const names: Record<Profile["kind"], string> = { rect: "Rectángulo", circle: "Círculo", ngon: "Polígono", poly: "Polilínea" };
   ps.append(h("h3", {}, names[p.kind], h("button", { class: "btn small", onclick: () => sketcher.deleteSelected() }, "Borrar")));
-  ps.append(checkField("Es un agujero", p.hole, (v) => (p.hole = v)));
+  const isOpen = p.kind === "poly" && !!p.open;
+  if (!isOpen) ps.append(checkField("Es un agujero", p.hole, (v) => (p.hole = v)));
+  if (p.kind === "poly") ps.append(checkField("Línea abierta (camino para un barrido)", isOpen, (v) => { if (v) p.open = true; else delete p.open; }));
   const k = (fl: string) => `${f.id}:${p.id}:${fl}`;
   const E = (label: string, key: string, unit?: string) =>
     exprField(label, () => (p as never)[key], (v) => ((p as unknown as Record<string, unknown>)[key] = v), k(key), unit ? { unit } : {});
@@ -676,7 +874,7 @@ function renderSketchProps(sec: HTMLElement, f: SketchFeature) {
         h("div", { class: "row-pt" },
           exprInline(() => pt.x, (v) => (pt.x = v)),
           exprInline(() => pt.y, (v) => (pt.y = v)),
-          p.pts.length > 3 ? h("button", { class: "btn small", title: "Quitar punto", onclick: () => { p.pts.splice(i, 1); changed(true, true); } }, "✕") : h("span"),
+          p.pts.length > 3 ? h("button", { class: "btn small", title: "Quitar punto", onclick: () => { p.pts.splice(i, 1); f.constraints = f.constraints?.filter((c) => c.s.p !== p.id && !("t" in c && c.t.p === p.id)); cleanConstraints(f); changed(true, true); } }, "✕") : h("span"),
         )));
     });
   }
@@ -697,7 +895,7 @@ function exprInline(get: () => string, set: (v: string) => void) {
 
 const SK_TOOLS: [SketchTool, string, string][] = [
   ["select", "↖ Elegir", "S"], ["poly", "╱ Líneas", "L"], ["rect", "▭ Rectángulo", "R"],
-  ["circle", "◯ Círculo", "C"], ["ngon", "⬡ Polígono", "P"],
+  ["circle", "◯ Círculo", "C"], ["ngon", "⬡ Polígono", "P"], ["path", "〰 Camino", "W"],
 ];
 
 function renderSketchBar() {
@@ -706,11 +904,25 @@ function renderSketchBar() {
   for (const [t, label, key] of SK_TOOLS) {
     bar.append(h("button", { class: `btn small ${sketcher.tool === t ? "on" : ""}`, title: `Atajo: ${key}`, onclick: () => { sketcher.setTool(t); renderSketchBar(); } }, label));
   }
+  // restricciones para los tramos elegidos
+  const n = sketcher.picks.length;
+  const kinds = n === 1 ? (["h", "v"] as const) : n === 2 ? (["equal", "parallel", "perp"] as const) : [];
+  if (kinds.length) {
+    bar.append(h("span", { class: "sep" }));
+    for (const kd of kinds) {
+      bar.append(h("button", { class: "btn small", title: CONSTRAINT_NAME[kd], onclick: () => {
+        const err = sketcher.addConstraint(kd);
+        if (err) toast(err);
+        renderSketchBar();
+      } }, `${CONSTRAINT_GLYPH[kd]} ${CONSTRAINT_NAME[kd]}`));
+    }
+  }
   const snap = h("button", { class: `btn small ${sketcher.snapOn ? "on" : ""}`, title: "Ajustar a la rejilla (Mayús lo suspende)", onclick: () => { sketcher.snapOn = !sketcher.snapOn; renderSketchBar(); } }, "# Rejilla");
   bar.append(snap, h("button", { class: "btn small", onclick: () => sketcher.fitView() }, "Encajar"));
   bar.append(h("span", { class: "spacer" }));
   bar.append(h("button", { class: "btn small primary", onclick: () => setActive(null) }, "✓ Terminar boceto"));
-  $("#sketchhint").innerHTML = `${TOOL_HINT[sketcher.tool]} · Rueda: zoom · Botón derecho o central: desplazar`;
+  const consHint = sketcher.tool === "select" ? (n === 1 ? " · Mayús+clic en otro tramo para elegir dos" : n === 0 ? " · Clic en un tramo de unas líneas para ponerle restricciones" : "") : "";
+  $("#sketchhint").textContent = `${TOOL_HINT[sketcher.tool]}${consHint} · Rueda: zoom · Botón derecho o central: desplazar`;
 }
 
 /** Pasa al editor 2D las aristas de la pieza vistas desde el plano del boceto */
@@ -755,13 +967,15 @@ viewport.events.onFacePick = (point, normal) => {
     changed(true, true);
     return;
   }
-  if (f?.type === "hole" || f?.type === "rod") {
+  if (f?.type === "hole" || f?.type === "rod" || f?.type === "text") {
     const n = normal.map((c) => Math.round(c * 1e6) / 1e6) as Vec3;
     // redondeo a 0,5 mm y vuelta al plano de la cara, para que las medidas salgan limpias
     let q = point.map((c) => Math.round(c * 2) / 2) as Vec3;
     const d = (point[0] - q[0]) * n[0] + (point[1] - q[1]) * n[1] + (point[2] - q[2]) * n[2];
     q = [q[0] + n[0] * d, q[1] + n[1] * d, q[2] + n[2] * d].map((c) => Math.round(c * 1000) / 1000) as Vec3;
-    f.points.push({ x: fmt(q[0]), y: fmt(q[1]), z: fmt(q[2]), n });
+    const fp = { x: fmt(q[0]), y: fmt(q[1]), z: fmt(q[2]), n };
+    if (f.type === "text") f.points = [fp]; // el texto va en un solo sitio
+    else f.points.push(fp);
     changed(true, true);
     return;
   }
@@ -818,6 +1032,9 @@ function renderBanner() {
   } else if (f?.type === "hole" || f?.type === "rod") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en una cara para colocar cada uno`;
+  } else if (f?.type === "text") {
+    b.hidden = false;
+    b.textContent = `${f.name}: clic en una cara para colocar el texto`;
   } else b.hidden = true;
 }
 
@@ -828,7 +1045,7 @@ function renderMarks() {
     const rf = resolved.features.find((x) => x.id === f.id) as Resolved<SketchFeature> | undefined;
     if (rf) plane = planeBasis(rf.plane as never);
   }
-  const pins = f && (f.type === "hole" || f.type === "rod")
+  const pins = f && (f.type === "hole" || f.type === "rod" || f.type === "text")
     ? ((resolved.features.find((x) => x.id === f.id) as Resolved<HoleFeature> | undefined)?.points ?? []).map((p) => ({ p: [p.x, p.y, p.z] as Vec3, n: p.n as Vec3 }))
     : [];
   viewport.setMarks({
@@ -841,7 +1058,7 @@ function renderMarks() {
 
 /** Dibuja en 3D los bocetos que aún no se han usado (y el activo) */
 function renderSketchLines() {
-  const used = new Set(doc.features.flatMap((f) => (f.type === "extrude" || f.type === "revolve") && !f.off ? [f.sketch] : []));
+  const used = new Set(doc.features.flatMap((f) => (f.off ? [] : sketchUses(f))));
   const out: { pts: Vec3[][]; active: boolean }[] = [];
   for (const f of resolved.features) {
     if (f.type !== "sketch" || f.off) continue;
@@ -906,12 +1123,23 @@ function openDialog() {
   if (!dlg.open) dlg.showModal();
 }
 
+/** Descarga el proyecto; los archivos importados van dentro para poder abrirlo en otro equipo */
+async function saveProjectFile() {
+  const out: Doc = JSON.parse(JSON.stringify(doc));
+  for (const f of doc.features) {
+    if (f.type !== "import" || !f.file || out.files?.[f.file]) continue;
+    const st = await files.get(f.file);
+    if (st) (out.files ??= {})[f.file] = { name: st.name, format: st.format, data: toBase64(st.data) };
+  }
+  download(JSON.stringify(out, null, 2), `${safeName()}.geometria.json`, "application/json");
+}
+
 function fileAction(a: string) {
   if (a === "new") setDoc(emptyDoc(), uid());
   else if (a === "example") setDoc(exampleDoc(), uid());
   else if (a === "dup") { const d: Doc = JSON.parse(JSON.stringify(doc)); d.name += " (copia)"; setDoc(d, uid()); toast("Copia creada"); }
   else if (a === "open") openDialog();
-  else if (a === "save-file") download(JSON.stringify(doc, null, 2), `${safeName()}.geometria.json`, "application/json");
+  else if (a === "save-file") void saveProjectFile();
   else if (a === "load-file") $("#file").click();
 }
 
@@ -923,6 +1151,11 @@ $("#file").addEventListener("change", async (e) => {
   try {
     const d = JSON.parse(await file.text());
     if (!isDoc(d)) throw new Error();
+    // los archivos importados que trae dentro se guardan aparte
+    for (const [id, f] of Object.entries(d.files ?? {})) {
+      if (f && (f.format === "step" || f.format === "stl") && typeof f.data === "string") await files.put(id, { name: String(f.name), format: f.format, data: fromBase64(f.data) });
+    }
+    delete d.files;
     setDoc(d, uid());
     toast("Proyecto cargado");
   } catch {
@@ -1002,7 +1235,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (!sketcher.cancel()) setActive(null); renderSketchBar(); return; }
     if (e.key === "Enter") { sketcher.finishPoly(); return; }
     if (e.key === "Delete" || e.key === "Backspace") { sketcher.deleteSelected(); return; }
-    const map: Record<string, SketchTool> = { s: "select", l: "poly", r: "rect", c: "circle", p: "ngon" };
+    const map: Record<string, SketchTool> = { s: "select", l: "poly", r: "rect", c: "circle", p: "ngon", w: "path" };
     const t = map[e.key.toLowerCase()];
     if (t && !mod) { sketcher.setTool(t); renderSketchBar(); }
     return;

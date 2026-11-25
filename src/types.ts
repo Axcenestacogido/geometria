@@ -28,7 +28,12 @@ export type Profile =
   | (ProfileBase & { kind: "rect"; x: Expr; y: Expr; w: Expr; h: Expr; r: Expr })
   | (ProfileBase & { kind: "circle"; cx: Expr; cy: Expr; r: Expr })
   | (ProfileBase & { kind: "ngon"; cx: Expr; cy: Expr; r: Expr; n: Expr })
-  | (ProfileBase & { kind: "poly"; pts: PolyPoint[] });
+  | (ProfileBase & {
+      kind: "poly";
+      pts: PolyPoint[];
+      /** true = línea abierta (no encierra nada): sirve de camino para un barrido */
+      open?: boolean;
+    });
 
 export type BoolOp = "new" | "add" | "cut" | "intersect";
 
@@ -39,10 +44,19 @@ interface FeatureBase {
   off?: boolean;
 }
 
+/** Un tramo de una polilínea: perfil `p`, tramo que sale del punto `i` */
+export interface SegRef { p: string; i: number }
+
+/** Restricciones entre tramos de polilíneas. Se cumplen moviendo los puntos que son números sueltos. */
+export type SketchConstraint =
+  | { id: string; kind: "h" | "v"; s: SegRef }
+  | { id: string; kind: "equal" | "parallel" | "perp"; s: SegRef; t: SegRef };
+
 export interface SketchFeature extends FeatureBase {
   type: "sketch";
   plane: PlaneDef;
   profiles: Profile[];
+  constraints?: SketchConstraint[];
 }
 
 interface SolidOpBase extends FeatureBase {
@@ -152,6 +166,50 @@ export interface RodFeature extends FeatureBase {
   target?: string;
 }
 
+export type TextFont = "sans" | "sans-bold" | "mono";
+
+/** Texto en 3D: en relieve (sumar) o grabado (restar) sobre una cara */
+export interface TextFeature extends SolidOpBase {
+  type: "text";
+  text: string;
+  font: TextFont;
+  /** alto de las letras (mm) */
+  size: Expr;
+  depth: Expr;
+  /** giro del texto sobre la cara (grados) */
+  angle: Expr;
+  /** dónde va el centro del texto (clic en una cara). Vacío = en el suelo, en el origen */
+  points: FacePoint[];
+}
+
+/** Barrido: un perfil que recorre un camino */
+export interface SweepFeature extends SolidOpBase {
+  type: "sweep";
+  /** boceto con la forma (se coloca al principio del camino, centrada en su origen) */
+  sketch: string;
+  /** boceto con el camino (una línea abierta o un contorno cerrado) */
+  path: string;
+}
+
+/** Transición (loft) entre varios bocetos */
+export interface LoftFeature extends SolidOpBase {
+  type: "loft";
+  sketches: string[];
+  /** true = caras rectas entre bocetos; false = transición suave */
+  ruled: boolean;
+}
+
+/** Pieza traída de otro programa (STEP o STL) */
+export interface ImportFeature extends SolidOpBase {
+  type: "import";
+  /** id del archivo guardado en este navegador */
+  file: string;
+  fileName: string;
+  format: "step" | "stl";
+  x: Expr; y: Expr; z: Expr;
+  scale: Expr;
+}
+
 export type Feature =
   | SketchFeature
   | ExtrudeFeature
@@ -163,7 +221,11 @@ export type Feature =
   | ShellFeature
   | PatternFeature
   | HoleFeature
-  | RodFeature;
+  | RodFeature
+  | TextFeature
+  | SweepFeature
+  | LoftFeature
+  | ImportFeature;
 
 export interface Variable {
   name: string;
@@ -175,6 +237,8 @@ export interface Doc {
   name: string;
   variables: Variable[];
   features: Feature[];
+  /** Solo en el .json descargado: archivos importados (base64), para llevarlos a otro equipo */
+  files?: Record<string, { name: string; format: "step" | "stl"; data: string }>;
 }
 
 // ---------- Mensajes con el trabajador (motor geométrico) ----------
@@ -215,10 +279,12 @@ export interface BuildResult {
 
 export type WorkerIn =
   | { kind: "build"; seq: number; features: Resolved<Feature>[]; upTo?: string }
+  | { kind: "file"; id: string; format: "step" | "stl"; data: ArrayBuffer }
   | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf" };
 
 export type WorkerOut =
   | { kind: "ready" }
   | { kind: "fatal"; message: string }
   | ({ kind: "built" } & BuildResult)
-  | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string };
+  | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string }
+  | { kind: "file"; id: string; error?: string; triangles?: number };
