@@ -62,6 +62,7 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
   fillet: "Redondeo",
   chamfer: "Chaflán",
   shell: "Vaciado",
+  pushpull: "Empujar cara",
   pattern: "Patrón",
   hole: "Agujeros",
   rod: "Varilla roscada",
@@ -77,7 +78,7 @@ export const FEATURE_LABEL: Record<Feature["type"], string> = {
 
 export const FEATURE_ICON: Record<Feature["type"], string> = {
   sketch: "✎", extrude: "⬆", revolve: "↻", box: "▣", cylinder: "◉", sphere: "●", gear: "⚙", transform: "✥", joint: "⚭", catalog: "⚙︎", split: "✂", combine: "⧉", spring: "〰", fillet: "◜", chamfer: "◸",
-  shell: "⬚", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", relief: "▦", plane: "▱", layflat: "⤓", component: "❖",
+  shell: "⬚", pushpull: "⇕", pattern: "⁂", hole: "⊚", rod: "⫶", text: "A", sweep: "➰", loft: "⏢", import: "⇩", relief: "▦", plane: "▱", layflat: "⤓", component: "❖",
 };
 
 function nextName(doc: Doc, type: Feature["type"]) {
@@ -131,6 +132,8 @@ export function newFeature(doc: Doc, type: Feature["type"], plane?: PlaneDef): F
       return { id, name, type, size: "1", edges: [] };
     case "shell":
       return { id, name, type, thickness: "2", faces: [] };
+    case "pushpull":
+      return { id, name, type, face: null, normal: [0, 0, 1], distance: "5" };
     case "pattern": {
       // por defecto, repetir el último paso que crea o quita volumen
       const src = [...doc.features].reverse().find((f) => ["extrude", "revolve", "box", "cylinder", "sphere", "gear", "spring", "hole", "rod", "text", "sweep", "loft", "import", "relief", "component"].includes(f.type));
@@ -185,6 +188,7 @@ const NUM_FIELDS: Record<string, string[]> = {
   fillet: ["size"],
   chamfer: ["size"],
   shell: ["thickness"],
+  pushpull: ["distance"],
   pattern: ["count", "spacing", "count2", "spacing2", "cx", "cy", "cz", "angle", "offset"],
   hole: ["depth", "fit"],
   rod: ["length", "fit"],

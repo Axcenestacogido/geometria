@@ -420,3 +420,14 @@ dialog:has(.keys) { width: min(860px, calc(100vw - 32px)); }
 .hidechip { top: 10px; bottom: auto; left: 10px; font-size: 13px; }
 @media (max-width: 700px) { .hidechip { top: 60px; bottom: auto; } }
 .ctx-sw.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.push-label { position: absolute; z-index: 5; pointer-events: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.push-label[hidden] { display: none; }
+
+/* carpetas en la lista de pasos */
+.tree li.grp { font-weight: 600; font-size: 13px; color: var(--text); padding-top: 7px; }
+.tree li.grp .ic { color: var(--accent); }
+.tree li.grp .grp-n { font-size: 11px; color: var(--muted); font-weight: 400; background: var(--panel-2); border-radius: 8px; padding: 0 6px; }
+.tree li.in-group { margin-left: 14px; border-left: 2px solid var(--line); border-radius: 0 6px 6px 0; }
+.tree li.picked { background: var(--accent-soft); outline: 1px dashed var(--accent); }
+.tree li.grp-bar { flex-wrap: wrap; cursor: default; background: var(--panel-2); }
+.tree .grp-name { flex: 1; min-width: 0; font: inherit; padding: 2px 6px; border: 1px solid var(--accent); border-radius: 4px; background: var(--panel); color: var(--text); }

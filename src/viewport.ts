@@ -17,7 +17,7 @@ export interface ViewportEvents {
   /** clic sin herramienta: el cuerpo que hay debajo (o null si es el vacío) */
   onBodyClick?: (id: string | null) => void;
   /** botón derecho sin arrastrar: cuerpo debajo (o null) y dónde abrir el menú */
-  onBodyMenu?: (id: string | null, x: number, y: number) => void;
+  onBodyMenu?: (id: string | null, x: number, y: number, face: { point: Vec3; normal: Vec3 } | null) => void;
   /** doble clic sobre una cara sin herramienta: para dibujar encima */
   onFaceDouble?: (point: Vec3, normal: Vec3) => void;
 }
@@ -110,8 +110,29 @@ export class Viewport {
     this.resize();
 
     const el = this.renderer.domElement;
+    // flecha de «Empujar cara»: se coge antes que la órbita de la cámara (por eso en captura)
+    el.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !this.push || !this.hitPush(e)) return;
+      const p = this.push;
+      this.controls.enabled = false;
+      el.setPointerCapture(e.pointerId);
+      this.pushDrag = { start: p.dist, t0: this.lineParam(e) };
+    }, { capture: true });
+    el.addEventListener("pointermove", (e) => {
+      if (!this.pushDrag || !this.push) return;
+      const raw = this.pushDrag.start + this.lineParam(e) - this.pushDrag.t0;
+      const d = Math.round(raw * 2) / 2; // medio milímetro
+      if (d !== this.push.dist) { this.push.dist = d; this.drawPush(); }
+    });
     el.addEventListener("pointerdown", (e) => { this.down = { x: e.clientX, y: e.clientY }; this.touch = e.pointerType === "touch"; });
     el.addEventListener("pointerup", (e) => {
+      if (this.pushDrag) {
+        this.pushDrag = null;
+        this.down = null;
+        this.controls.enabled = true;
+        if (this.push) this.push.onDone(this.push.dist);
+        return;
+      }
       if (!this.down) return;
       const moved = Math.hypot(e.clientX - this.down.x, e.clientY - this.down.y);
       this.down = null;
@@ -126,7 +147,8 @@ export class Viewport {
       const r = right;
       right = null;
       if (e.button !== 2 || !r || this.pickMode !== "none" || Math.hypot(e.clientX - r.x, e.clientY - r.y) > 5) return;
-      this.events.onBodyMenu?.(this.pickBody(e), e.clientX, e.clientY);
+      const f = this.pickFace(e);
+      this.events.onBodyMenu?.(this.pickBody(e), e.clientX, e.clientY, f ? { point: [f.point.x, f.point.y, f.point.z], normal: [f.normal.x, f.normal.y, f.normal.z] } : null);
     });
     el.addEventListener("contextmenu", (e) => e.preventDefault());
     el.addEventListener("dblclick", (e) => {
@@ -137,6 +159,7 @@ export class Viewport {
 
     const loop = () => {
       this.anim?.(performance.now());
+      this.placePushLabel();
       this.controls.update();
       // la luz principal sale siempre desde un poco por encima de la cámara
       const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
@@ -752,6 +775,109 @@ export class Viewport {
     const hit = rc.intersectObjects(meshes, false).find((h) => !this.section || this.section.distanceToPoint(h.point) >= -1e-6);
     if (!hit || !hit.face) return null;
     return { point: hit.point, normal: hit.face.normal.clone() };
+  }
+
+  // ---------- flecha para empujar una cara ----------
+  private push: { point: Vec3; normal: Vec3; dist: number; onDone: (d: number) => void } | null = null;
+  private pushDrag: { start: number; t0: number } | null = null;
+  private pushGroup = new THREE.Group();
+  private pushLabel: HTMLDivElement | null = null;
+  /**
+   * Flecha sobre una cara: arrastrándola cambia la distancia (de medio en medio mm) y se ve
+   * en transparente cómo quedará. Al soltar avisa con la distancia nueva.
+   */
+  setPush(p: { point: Vec3; normal: Vec3; dist: number; onDone: (d: number) => void } | null) {
+    this.push = p ? { ...p } : null;
+    if (!this.pushGroup.parent) this.scene.add(this.pushGroup);
+    this.drawPush();
+  }
+  private clearPush() {
+    for (const c of [...this.pushGroup.children]) {
+      this.pushGroup.remove(c);
+      (c as THREE.Mesh).geometry?.dispose();
+    }
+  }
+  private drawPush() {
+    this.clearPush();
+    if (!this.pushLabel) {
+      this.pushLabel = document.createElement("div");
+      this.pushLabel.className = "push-label";
+      this.host.append(this.pushLabel);
+    }
+    const p = this.push;
+    this.pushLabel.hidden = !p;
+    if (!p) return;
+    const n = new THREE.Vector3(...p.normal).normalize();
+    const o = new THREE.Vector3(...p.point);
+    const accent = new THREE.Color(css("--accent"));
+    // fantasma: la cara desplazada y sus paredes
+    const tris = this.faceTriangles(o);
+    if (tris && Math.abs(p.dist) > 1e-9) {
+      const off = n.clone().multiplyScalar(p.dist);
+      const pos: number[] = [];
+      for (let i = 0; i < tris.length; i += 3) pos.push(tris[i] + off.x, tris[i + 1] + off.y, tris[i + 2] + off.z);
+      // bordes de la cara = lados de triángulo que no comparte otro triángulo
+      const key = (i: number) => `${tris[i].toFixed(3)},${tris[i + 1].toFixed(3)},${tris[i + 2].toFixed(3)}`;
+      const edges = new Map<string, [number, number] | null>();
+      for (let t = 0; t < tris.length; t += 9) for (const [a, b] of [[t, t + 3], [t + 3, t + 6], [t + 6, t]]) {
+        const ka = key(a), kb = key(b), k = ka < kb ? ka + "|" + kb : kb + "|" + ka;
+        edges.set(k, edges.has(k) ? null : [a, b]);
+      }
+      for (const e of edges.values()) {
+        if (!e) continue;
+        const [a, b] = e;
+        const A = [tris[a], tris[a + 1], tris[a + 2]], B = [tris[b], tris[b + 1], tris[b + 2]];
+        const A2 = [A[0] + off.x, A[1] + off.y, A[2] + off.z], B2 = [B[0] + off.x, B[1] + off.y, B[2] + off.z];
+        pos.push(...A, ...B, ...B2, ...A, ...B2, ...A2);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      const ghost = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false }));
+      ghost.renderOrder = 5;
+      this.pushGroup.add(ghost);
+    }
+    // la flecha, en la punta de lo empujado
+    const size = this.worldPerPixel() * 70 * (this.touch ? 1.4 : 1);
+    const tip = o.clone().addScaledVector(n, p.dist);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+    const mat = new THREE.MeshBasicMaterial({ color: accent, depthTest: false });
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.035, size * 0.035, size * 0.75, 12), mat);
+    shaft.position.copy(tip).addScaledVector(n, size * 0.375);
+    const head = new THREE.Mesh(new THREE.ConeGeometry(size * 0.12, size * 0.3, 20), mat);
+    head.position.copy(tip).addScaledVector(n, size * 0.9);
+    // zona invisible más gorda para cogerla fácil
+    const grab = new THREE.Mesh(new THREE.CylinderGeometry(size * 0.18, size * 0.18, size * 1.1, 8), new THREE.MeshBasicMaterial({ visible: false }));
+    grab.position.copy(tip).addScaledVector(n, size * 0.55);
+    grab.userData.grab = true;
+    for (const m of [shaft, head, grab]) { m.quaternion.copy(q); m.renderOrder = 10; this.pushGroup.add(m); }
+    this.pushTip = head.position.clone();
+    this.pushLabel.textContent = `${p.dist > 0 ? "+" : ""}${p.dist.toLocaleString("es-ES")} mm`;
+    this.placePushLabel();
+  }
+  private pushTip = new THREE.Vector3();
+  /** la etiqueta con los mm sigue a la punta de la flecha aunque gires la vista */
+  private placePushLabel() {
+    if (!this.push || !this.pushLabel) return;
+    const sp = this.pushTip.clone().project(this.camera);
+    const r = this.renderer.domElement.getBoundingClientRect(), hr = this.host.getBoundingClientRect();
+    this.pushLabel.style.left = `${r.left - hr.left + ((sp.x + 1) / 2) * r.width + 14}px`;
+    this.pushLabel.style.top = `${r.top - hr.top + ((1 - sp.y) / 2) * r.height - 10}px`;
+  }
+  private hitPush(e: PointerEvent) {
+    const grab = this.pushGroup.children.filter((c) => c.userData.grab);
+    return this.ray(e).intersectObjects(grab, false).length > 0;
+  }
+  /** Posición a lo largo de la normal de la cara más cercana al rayo del ratón */
+  private lineParam(e: PointerEvent): number {
+    if (!this.push) return 0;
+    const ray = this.ray(e).ray;
+    const o = new THREE.Vector3(...this.push.point), n = new THREE.Vector3(...this.push.normal).normalize();
+    // punto más cercano entre dos rectas
+    const w = o.clone().sub(ray.origin);
+    const b = n.dot(ray.direction), d = n.dot(w), e2 = ray.direction.dot(w);
+    const den = 1 - b * b;
+    if (Math.abs(den) < 1e-6) return 0;
+    return (b * e2 - d) / den;
   }
 
   /** Cuerpos ocultos (solo en la vista: se siguen exportando) */

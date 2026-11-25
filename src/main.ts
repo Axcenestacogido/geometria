@@ -2,7 +2,7 @@ import "./style.css";
 import type {
   Doc, Feature, SketchFeature, EdgeFeature, BuildResult, WorkerOut, Profile, StdPlane, Vec3, Resolved,
   PatternFeature, PatternKind, Axis, HoleFeature, RodFeature, HoleKind,
-  TextFeature, TextFont, SweepFeature, ExtrudeFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, RefPlaneFeature, TransformFeature, PlaneDef, LayFlatFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
+  TextFeature, TextFont, SweepFeature, ExtrudeFeature, GearFeature, CombineFeature, LoftFeature, ImportFeature, ReliefFeature, RefPlaneFeature, TransformFeature, PlaneDef, LayFlatFeature, PushPullFeature, ComponentFeature, DrawingView, DrawingDim, JointFeature, Clash, CatalogFeature, SplitFeature, BodyInfo, BodyMesh,
 } from "./types";
 import { checkPrint, DEFAULT_PRINT, type PrintSettings } from "./printcheck";
 import { TEMPLATES } from "./templates";
@@ -19,6 +19,8 @@ import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
 import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
+import { edgeShapes } from "./edgeloops";
+import { Dxf, addSvgPaths } from "./dxf";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
   FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, myFit, setMyFit, type ResolveOut,
@@ -97,6 +99,9 @@ $("#app").innerHTML = `
     <button data-f="3mf">3MF<small>Para Bambu Studio, Orca, Prusa (recomendado)</small></button>
     <button data-f="stl">STL<small>Para cualquier programa de impresión</small></button>
     <button data-f="step">STEP<small>Para Rhino, Fusion, FreeCAD…</small></button>
+    <div class="menu-h">2D (DXF, en mm)</div>
+    <button data-dxf="views">Vistas de la pieza<small>Frente, arriba, derecha y 3D, para Rhino o AutoCAD</small></button>
+    <button data-dxf="sketch">El boceto abierto<small>Para corte láser o CNC</small></button>
   </div></div>
 </header>
 <div class="main">
@@ -237,8 +242,8 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
 };
 
 /** Pasos que, mientras los editas, muestran la pieza como estaba antes de ellos */
-const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod", "text", "layflat"]);
-const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text", "layflat"]);
+const BEFORE_TYPES = new Set<Feature["type"]>(["fillet", "chamfer", "sketch", "shell", "hole", "rod", "text", "layflat", "pushpull"]);
+const FACE_PICK_TYPES = new Set<Feature["type"]>(["shell", "hole", "rod", "text", "layflat", "pushpull"]);
 
 /** Archivos importados que el motor ya tiene */
 const sentFiles = new Set<string>();
@@ -383,7 +388,7 @@ function renderUndo() {
 
 const ADD_LABEL: Partial<Record<Feature["type"], string>> = {
   extrude: "Extruir", revolve: "Revolución", hole: "Agujeros", rod: "Varilla", loft: "Transición", import: "Importar",
-  component: "Pieza", layflat: "Apoyar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve", plane: "Plano ref.",
+  component: "Pieza", layflat: "Apoyar", pushpull: "Empujar", transform: "Mover", combine: "Combinar", joint: "Unión", catalog: "Catálogo", split: "Partir", relief: "Relieve", plane: "Plano ref.",
 };
 const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   sweep: "Un perfil que recorre un camino (tubos, asas, muelles…)",
@@ -394,6 +399,7 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
   import: "Traer una pieza STEP o STL de otro programa",
   component: "Meter aquí una de tus piezas guardadas, con sus medidas cambiables",
   layflat: "Girar la pieza para apoyarla sobre una cara al imprimir",
+  pushpull: "Empujar o hundir una cara plana: arrastra la flecha y la pieza crece o se hunde (P)",
   transform: "Mover, girar o escalar un cuerpo (o una copia), con flechas o con números",
   combine: "Sumar, restar o intersecar cuerpos que ya existen",
   catalog: "Piezas que se compran (rodamientos, imanes, insertos, tuercas, perfil 2020, servo, NEMA 17), o el hueco justo para meterlas",
@@ -407,11 +413,11 @@ const ADD_TITLE: Partial<Record<Feature["type"], string>> = {
 const TOOL_GROUPS: { name: string; types: Feature["type"][] }[] = [
   { name: "Dibujar", types: ["sketch", "plane"] },
   { name: "Crear", types: ["extrude", "revolve", "box", "cylinder", "sphere", "sweep", "loft", "text", "relief", "gear", "spring"] },
-  { name: "Modificar", types: ["fillet", "chamfer", "shell", "hole", "rod", "pattern", "transform", "combine", "split"] },
+  { name: "Modificar", types: ["pushpull", "fillet", "chamfer", "shell", "hole", "rod", "pattern", "transform", "combine", "split"] },
   { name: "Montar e importar", types: ["joint", "catalog", "component", "import", "layflat"] },
 ];
 /** atajos de teclado de las herramientas (se ven en su globo) */
-const TOOL_KEY: Partial<Record<Feature["type"], string>> = { sketch: "B", extrude: "E", fillet: "F", transform: "M", hole: "H", box: "C", text: "T" };
+const TOOL_KEY: Partial<Record<Feature["type"], string>> = { sketch: "B", extrude: "E", fillet: "F", transform: "M", hole: "H", box: "C", text: "T", pushpull: "P" };
 const closedGroups = new Set<string>((() => { try { return JSON.parse(localStorage.getItem("geometria:grupos") ?? "[]") as string[]; } catch { return []; } })());
 
 /** Pulsa una herramienta de «Añadir» (desde el botón o con su atajo) */
@@ -426,7 +432,7 @@ function toolDisabled(type: Feature["type"]) {
   const hasSketch = doc.features.some((f) => f.type === "sketch");
   const hasBody = !!build?.bodies.length;
   const needSketch = type === "extrude" || type === "revolve" || type === "sweep" || type === "loft";
-  const needBody = ["fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine", "joint", "split"].includes(type);
+  const needBody = ["pushpull", "fillet", "chamfer", "shell", "pattern", "hole", "rod", "layflat", "transform", "combine", "joint", "split"].includes(type);
   return needSketch && !hasSketch ? "Primero haz un boceto" : needBody && !hasBody ? "Primero crea un sólido" : "";
 }
 
@@ -530,6 +536,8 @@ function setSheet(name: string | null) {
 document.querySelectorAll<HTMLElement>("#dock [data-sheet]").forEach((b) => b.addEventListener("click", () => setSheet(sheet === b.dataset.sheet ? null : b.dataset.sheet!)));
 
 function renderTree() {
+  // escribiendo el nombre de una carpeta: no rehacer la lista (se perdería lo escrito)
+  if ((document.activeElement as HTMLElement | null)?.classList.contains("grp-name")) return;
   renderTools();
   const ul = $("#tree");
   ul.innerHTML = "";
@@ -542,12 +550,30 @@ function renderTree() {
         h("button", { class: "btn small", onclick: () => openDialog() }, "Mis piezas…"))));
     return;
   }
+  if (treeSel.size) {
+    const n = treeSel.size;
+    const into = (g: string) => { doc.features.forEach((f) => { if (treeSel.has(f.id)) f.group = g; }); treeSel.clear(); treeAnchor = -1; changed(true, true); };
+    ul.append(h("li", { class: "grp-bar" },
+      h("button", { class: "btn small primary", onclick: makeGroup }, `📁 Meter ${n === 1 ? "1 paso" : `${n} pasos`} en una carpeta`),
+      ...groupNames().map((g) => h("button", { class: "btn small", onclick: () => into(g) }, `en «${g}»`)),
+      h("button", { class: "btn small", onclick: () => { treeSel.clear(); treeAnchor = -1; renderTree(); } }, "Cancelar")));
+  }
+  // carpetas: pasos seguidos con la misma carpeta van juntos bajo su cabecera
+  const folded = new Set(doc.folded ?? []);
+  let lastGroup: string | undefined;
   doc.features.forEach((f, i) => {
+    if (f.group && f.group !== lastGroup) ul.append(groupHeader(f.group, i));
+    lastGroup = f.group;
+    if (f.group && folded.has(f.group) && f.id !== active) return;
     const err = build?.errors[f.id] || Object.keys(resolved.fieldErrors).some((k) => k.startsWith(f.id + ":"));
     const li = h("li", {
-      class: `${f.id === active ? "active" : ""} ${f.off ? "off" : ""}`,
-      title: typeof err === "string" ? err : err ? "Hay una medida que no se entiende" : "",
-      onclick: () => setActive(f.id === active ? null : f.id),
+      class: `${f.id === active ? "active" : ""} ${f.off ? "off" : ""} ${f.group ? "in-group" : ""} ${treeSel.has(f.id) ? "picked" : ""}`,
+      title: typeof err === "string" ? err : err ? "Hay una medida que no se entiende" : "Mayús+clic: elegir varios para meterlos en una carpeta",
+      onclick: (e: MouseEvent) => {
+        if (e.shiftKey || e.metaKey || e.ctrlKey) { pickRange(i, e.shiftKey); return; }
+        if (treeSel.size) { treeSel.clear(); }
+        setActive(f.id === active ? null : f.id);
+      },
     },
       h("span", { class: "ic" }, FEATURE_ICON[f.type]),
       h("span", { class: "nm" }, f.name),
@@ -558,6 +584,92 @@ function renderTree() {
     );
     ul.append(li);
   });
+}
+
+// ---------- carpetas en la lista de pasos ----------
+/** pasos elegidos con Mayús+clic (para meterlos en una carpeta) */
+const treeSel = new Set<string>();
+let treeAnchor = -1;
+function pickRange(i: number, range: boolean) {
+  const id = doc.features[i].id;
+  if (range && treeAnchor >= 0) {
+    const [a, b] = [Math.min(treeAnchor, i), Math.max(treeAnchor, i)];
+    for (let k = a; k <= b; k++) treeSel.add(doc.features[k].id);
+  } else if (treeSel.has(id)) treeSel.delete(id);
+  else treeSel.add(id);
+  // el paso abierto también cuenta, para que Mayús+clic desde él coja el tramo
+  if (active && range && treeAnchor < 0) treeSel.add(active);
+  treeAnchor = i;
+  renderTree();
+}
+function groupNames() { return [...new Set(doc.features.map((f) => f.group).filter((g): g is string => !!g))]; }
+function makeGroup() {
+  const ids = doc.features.filter((f) => treeSel.has(f.id));
+  if (!ids.length) return;
+  let k = groupNames().length + 1, name = `Carpeta ${k}`;
+  while (groupNames().includes(name)) name = `Carpeta ${++k}`;
+  // los pasos de la carpeta se juntan donde estaba el primero (el orden entre ellos se mantiene)
+  const first = doc.features.findIndex((f) => treeSel.has(f.id));
+  const before = doc.features.slice(0, first).filter((f) => !treeSel.has(f.id));
+  const after = doc.features.slice(first).filter((f) => !treeSel.has(f.id));
+  ids.forEach((f) => (f.group = name));
+  doc.features = [...before, ...ids, ...after];
+  treeSel.clear(); treeAnchor = -1;
+  changed(true, true);
+  renamingGroup = name;
+  renderTree();
+}
+let renamingGroup: string | null = null;
+function groupHeader(name: string, at: number) {
+  // los pasos seguidos de esta carpeta, desde «at»
+  const run: Feature[] = [];
+  for (let j = at; j < doc.features.length && doc.features[j].group === name; j++) run.push(doc.features[j]);
+  const folded = (doc.folded ?? []).includes(name);
+  const allOff = run.every((f) => f.off);
+  const toggle = () => {
+    const set = new Set(doc.folded ?? []);
+    if (folded) set.delete(name); else set.add(name);
+    doc.folded = [...set];
+    if (!doc.folded.length) delete doc.folded;
+    changed(true);
+    renderTree();
+  };
+  const rename = (v: string) => {
+    if (renamingGroup !== name) return; // ya guardado (Intro y luego el blur)
+    const nv = v.trim();
+    renamingGroup = null;
+    (document.activeElement as HTMLElement | null)?.blur();
+    if (nv && nv !== name) {
+      doc.features.forEach((f) => { if (f.group === name) f.group = nv; });
+      if (doc.folded?.includes(name)) doc.folded = doc.folded.map((g) => (g === name ? nv : g));
+      changed(true);
+    }
+    renderTree();
+  };
+  const label = renamingGroup === name
+    ? (() => {
+        const inp = h("input", { class: "grp-name", value: name, title: "Nombre de la carpeta (Intro para guardar)" }) as HTMLInputElement;
+        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") rename(inp.value); if (e.key === "Escape") { renamingGroup = null; inp.blur(); renderTree(); } e.stopPropagation(); });
+        inp.addEventListener("blur", () => rename(inp.value));
+        inp.addEventListener("click", (e) => e.stopPropagation());
+        setTimeout(() => { inp.focus(); inp.select(); });
+        return inp;
+      })()
+    : h("span", { class: "nm", title: "Doble clic para cambiar el nombre" }, name);
+  const li = h("li", { class: `grp ${folded ? "folded" : ""} ${allOff ? "off" : ""}`, onclick: toggle },
+    h("span", { class: "ic" }, folded ? "▸" : "▾"),
+    label,
+    h("span", { class: "grp-n" }, String(run.length)),
+    h("button", { class: "act", title: allOff ? "Encender todos" : "Apagar todos (saltar estos pasos)", onclick: (e: Event) => { e.stopPropagation(); run.forEach((f) => (f.off = !allOff)); changed(true, true); } }, allOff ? "◌" : "◉"),
+    h("button", { class: "act", title: "Quitar la carpeta (los pasos se quedan)", onclick: (e: Event) => {
+      e.stopPropagation();
+      run.forEach((f) => delete f.group);
+      changed(true, true);
+      toast(`Carpeta «${name}» quitada`, { label: "Deshacer", run: () => undoRedo("undo") });
+    } }, "✕"),
+  );
+  li.addEventListener("dblclick", (e) => { e.stopPropagation(); renamingGroup = name; renderTree(); });
+  return li;
 }
 
 function move(i: number, d: number) {
@@ -1448,6 +1560,17 @@ function renderProps() {
       sec.append(h("div", { class: "empty mt" }, "Mientras editas este paso ves la pieza como estaba antes de él. Pulsa «Hecho» para ver el resultado."));
       break;
     }
+    case "pushpull": {
+      if (!f.face) { sec.append(h("div", { class: "msg info" }, "Haz clic en una cara plana de la pieza.")); break; }
+      sec.append(exprField("Distancia", () => f.distance, (v) => (f.distance = v), k("distance"), { unit: "mm", hint: "Positivo: la pieza crece. Negativo: se hunde." }));
+      sec.append(h("div", { class: "seg-btns" },
+        h("button", { class: "btn small", title: "Cambiar crecer por hundir", onclick: () => {
+          f.distance = /^\s*-?(\d+\.?\d*|\.\d+)\s*$/.test(f.distance) ? fmt(-Number(f.distance)) : `-(${f.distance})`;
+          changed(true, true); renderProps();
+        } }, "⇅ Al revés")));
+      sec.append(h("div", { class: "empty mt" }, "Arrastra la flecha naranja en la vista: va de medio en medio milímetro y ves en transparente cómo quedará. Otro clic en una cara la cambia."));
+      break;
+    }
     case "shell": {
       sec.append(exprField("Grosor pared", () => f.thickness, (v) => (f.thickness = v), k("thickness")));
       sec.append(h("div", { class: "msg info" }, `Haz clic en la cara (o caras) que quedan abiertas; otro clic la quita. Elegidas: ${f.faces.length}.`));
@@ -2075,6 +2198,7 @@ function renderSketchBar() {
     );
     if (n === 1 || sketcher.selSeg !== null) bar.append(h("button", { class: "btn small", title: "Quita el tramo elegido", onclick: () => run(() => sketcher.removeSelectedSegment()) }, "✂ Quitar tramo"));
   }
+  if (sketchRef.inP.length || sketchRef.outP.length) bar.append(h("button", { class: "btn small", title: "Copia al boceto los contornos de la pieza que están en este plano (o, si no hay, los que se ven desde él)", onclick: useBodyEdges }, "⬚ Bordes de la pieza"));
   const snap = h("button", { class: `btn small ${sketcher.snapOn ? "on" : ""}`, title: "Ajustar a la rejilla (Mayús lo suspende)", onclick: () => { sketcher.snapOn = !sketcher.snapOn; renderSketchBar(); } }, "# Rejilla");
   bar.append(snap, h("button", { class: "btn small", onclick: () => sketcher.fitView() }, "Encajar"));
   if (sketcher.tool === "poly" || sketcher.tool === "path") bar.append(h("button", { class: "btn small", title: "Igual que Intro o doble clic", onclick: () => sketcher.finishPoly() }, "↵ Acabar línea"));
@@ -2116,6 +2240,30 @@ function sendSketchReference(m: BuildResult) {
     }
   }
   sketcher.setReference(inP, outP);
+  const had = !!(sketchRef.inP.length || sketchRef.outP.length);
+  sketchRef = { inP, outP };
+  if (had !== !!(inP.length || outP.length)) renderSketchBar();
+}
+/** aristas de la pieza vistas desde el boceto abierto: en el plano y proyectadas */
+let sketchRef: { inP: number[]; outP: number[] } = { inP: [], outP: [] };
+
+/** Mete en el boceto los bordes de la pieza: los que están en su plano o, si no hay, los proyectados */
+function useBodyEdges() {
+  const f = doc.features.find((x) => x.id === active);
+  if (f?.type !== "sketch") return;
+  const onPlane = sketchRef.inP.length > 0;
+  const shapes = edgeShapes(onPlane ? sketchRef.inP : sketchRef.outP);
+  if (!shapes.length) return toast("No encuentro contornos cerrados de la pieza en este plano");
+  for (const s of shapes) {
+    const id = uid();
+    if (s.kind === "circle") f.profiles.push({ id, kind: "circle", hole: s.hole, cx: fmt(s.cx), cy: fmt(s.cy), r: fmt(s.r) });
+    else if (s.kind === "rect") f.profiles.push({ id, kind: "rect", hole: s.hole, x: fmt(s.x), y: fmt(s.y), w: fmt(s.w), h: fmt(s.h), r: "0" });
+    else f.profiles.push({ id, kind: "poly", hole: s.hole, pts: s.pts.map(([x, y]) => ({ x: fmt(x), y: fmt(y) })) });
+  }
+  sketcher.render();
+  changed(true, true);
+  const n = shapes.length;
+  toast(`${n === 1 ? "1 contorno" : `${n} contornos`} de la pieza${onPlane ? "" : " (vistos desde el boceto)"}`, { label: "Deshacer", run: () => undoRedo("undo") });
 }
 
 function startFacePick() {
@@ -2127,6 +2275,13 @@ function startFacePick() {
 
 viewport.events.onFacePick = (point, normal) => {
   const f = doc.features.find((x) => x.id === active);
+  if (f?.type === "pushpull") {
+    const r3 = (v: Vec3) => v.map((c) => Math.round(c * 1000) / 1000) as Vec3;
+    f.face = r3(point); f.normal = r3(normal);
+    changed(true, true);
+    renderProps();
+    return;
+  }
   if (f?.type === "layflat") {
     f.face = point.map((c) => Math.round(c * 1000) / 1000) as Vec3;
     changed(true, true);
@@ -2225,6 +2380,9 @@ function renderBanner() {
   } else if (f?.type === "layflat") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en la cara que irá sobre la cama`;
+  } else if (f?.type === "pushpull") {
+    b.hidden = false;
+    b.textContent = f.face ? `${f.name}: arrastra la flecha (o clic en otra cara)` : `${f.name}: clic en la cara plana que quieres empujar`;
   } else if (f?.type === "text") {
     b.hidden = false;
     b.textContent = `${f.name}: clic en una cara para colocar el texto`;
@@ -2329,7 +2487,7 @@ function isolateBody(id: string) {
 }
 const nn = (...xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement => !!x);
 function closeMenu() { document.querySelectorAll(".ctxmenu").forEach((x) => x.remove()); }
-function bodyMenu(id: string | null, x: number, y: number) {
+function bodyMenu(id: string | null, x: number, y: number, face: { point: Vec3; normal: Vec3 } | null = null) {
   closeMenu();
   if (active || explode || measuring) return;
   const b = id ? build?.bodies.find((q) => q.id === id) : undefined;
@@ -2352,6 +2510,7 @@ function bodyMenu(id: string | null, x: number, y: number) {
       item("✥ Mover", "G", () => pick("translate")),
       item("⟳ Girar", "R", () => pick("rotate")),
       item("⧉ Hacer una copia", "Ctrl D", () => { pick("translate"); ($("#selpanel").querySelector("[data-copy]") as HTMLButtonElement | null)?.click(); }),
+      face ? item("⇕ Empujar esta cara", "", () => pushFace(face)) : null,
       colorRow,
       h("hr"),
       item("◌ Ocultar", "V", () => hideBody(b.id)),
@@ -2378,7 +2537,17 @@ function bodyMenu(id: string | null, x: number, y: number) {
 document.addEventListener("pointerdown", (e) => { if (!(e.target as HTMLElement).closest?.(".ctxmenu")) closeMenu(); }, true);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
 addEventListener("resize", closeMenu);
-viewport.events.onBodyMenu = (id, x, y) => bodyMenu(id, x, y);
+viewport.events.onBodyMenu = (id, x, y, face) => bodyMenu(id, x, y, face);
+/** paso «Empujar cara» nuevo sobre esa cara, abierto y con la flecha lista */
+function pushFace(face: { point: Vec3; normal: Vec3 }) {
+  const r3 = (v: Vec3) => v.map((c) => Math.round(c * 1000) / 1000) as Vec3;
+  const f = newFeature(doc, "pushpull") as PushPullFeature;
+  f.face = r3(face.point); f.normal = r3(face.normal);
+  selBody = null;
+  doc.features.push(f);
+  setActive(f.id);
+  changed(true, true);
+}
 
 viewport.events.onBodyClick = (id) => {
   if (active || explode || measuring) return;
@@ -2415,7 +2584,27 @@ function newMove(body: string, d: GizmoDelta, after?: string): TransformFeature 
   return t;
 }
 
+/** flecha de «Empujar cara» cuando ese paso está abierto */
+function renderPush() {
+  const f = doc.features.find((x) => x.id === active);
+  if (f?.type !== "pushpull" || !f.face || !build) { viewport.setPush(null); return; }
+  const rf = resolved.features.find((x) => x.id === f.id) as Resolved<PushPullFeature> | undefined;
+  const dist = rf?.distance ?? 0;
+  viewport.setPush({
+    point: f.face, normal: f.normal, dist,
+    onDone: (d) => {
+      if (Math.abs(d - dist) < 1e-9) return;
+      // si era una cuenta (con variables), se le suma lo arrastrado en vez de borrarla
+      f.distance = addTo(f.distance, d - dist);
+      if (isZero(f.distance)) f.distance = "0.5";
+      changed(true, true);
+      renderProps();
+    },
+  });
+}
+
 function renderGizmo() {
+  renderPush();
   const f = doc.features.find((x) => x.id === active);
   if (!f && selBody && build && !explode) {
     // cuerpo elegido con un clic: se mueve o gira directamente
@@ -3009,6 +3198,59 @@ for (const m of document.querySelectorAll<HTMLElement>(".menu")) {
 document.addEventListener("click", () => document.querySelectorAll(".menu").forEach((x) => x.classList.remove("open")));
 $("#m-file").querySelectorAll<HTMLElement>("[data-a]").forEach((b) => b.addEventListener("click", () => fileAction(b.dataset.a!)));
 $("#m-export").querySelectorAll<HTMLElement>("[data-f]").forEach((b) => b.addEventListener("click", () => doExport(b.dataset.f as never)));
+$("#m-export").querySelectorAll<HTMLElement>("[data-dxf]").forEach((b) => b.addEventListener("click", () => (b.dataset.dxf === "sketch" ? exportSketchDxf() : exportViewsDxf())));
+
+/** El boceto abierto (o el último que hiciste) en DXF, en sus coordenadas del plano */
+function exportSketchDxf() {
+  const f = doc.features.find((x) => x.id === active && x.type === "sketch") ?? [...doc.features].reverse().find((x) => x.type === "sketch");
+  if (!f) return toast("Todavía no hay ningún boceto");
+  const rf = resolveDoc(doc).features.find((x) => x.id === f.id) as Resolved<SketchFeature> | undefined;
+  if (!rf?.profiles.length) return toast(`«${f.name}» está vacío`);
+  const dxf = new Dxf().layer("CONTORNO", 7).layer("AGUJEROS", 1);
+  for (const p of rf.profiles) {
+    const layer = p.hole ? "AGUJEROS" : "CONTORNO";
+    if (p.kind === "circle") dxf.circle([p.cx, p.cy], p.r, layer);
+    else if (p.kind === "rect" && p.r > 0) {
+      // rectángulo con esquinas redondeadas: 4 rectas y 4 arcos de verdad
+      const { x, y, w, h: hh } = p, r = Math.min(p.r, Math.abs(w) / 2, Math.abs(hh) / 2);
+      dxf.line([x + r, y], [x + w - r, y], layer); dxf.line([x + w, y + r], [x + w, y + hh - r], layer);
+      dxf.line([x + w - r, y + hh], [x + r, y + hh], layer); dxf.line([x, y + hh - r], [x, y + r], layer);
+      dxf.arc([x + w - r, y + r], r, 270, 360, layer); dxf.arc([x + w - r, y + hh - r], r, 0, 90, layer);
+      dxf.arc([x + r, y + hh - r], r, 90, 180, layer); dxf.arc([x + r, y + r], r, 180, 270, layer);
+    } else dxf.polyline(profileLoop(p as never), layer);
+  }
+  download(dxf.toString(), `${safeName()}-${f.name.replace(/[^\wáéíóúñÁÉÍÓÚÑ-]+/g, "-")}.dxf`, "image/vnd.dxf");
+  toast(f.id === active ? "Boceto en DXF" : `Ningún boceto abierto: va «${f.name}», el último`);
+}
+
+/** Las vistas del plano en DXF: frente abajo a la izquierda, arriba encima, derecha al lado y 3D en la esquina */
+function exportViewsDxf() {
+  if (!engineReady) return toast("El motor aún está cargando");
+  if (!build?.bodies.length) return toast("Todavía no hay ninguna pieza");
+  const s = ++seq;
+  toast("Dibujando las vistas…");
+  drawingWaiters.set(s, (m) => {
+    rebuild();
+    const by = new Map((m.views ?? []).map((v) => [v.name, v]));
+    const fr = by.get("front");
+    if (!fr) return toast("No se pudo dibujar: " + (m.error ?? "sin vistas"));
+    const gap = 20;
+    const W = fr.box[2] - fr.box[0], H = fr.box[3] - fr.box[1];
+    const dxf = new Dxf().layer("VISIBLE", 7).layer("OCULTAS", 8);
+    const put = (v: DrawingView | undefined, ox: number, oy: number) => {
+      if (!v) return;
+      addSvgPaths(dxf, v.visible, "VISIBLE", [ox, oy]);
+      addSvgPaths(dxf, v.hidden, "OCULTAS", [ox, oy]);
+    };
+    const top = by.get("top"), right = by.get("right"), iso = by.get("iso");
+    put(fr, -fr.box[0], fr.box[3]);
+    put(top, -fr.box[0], H + gap + (top?.box[3] ?? 0));
+    put(right, W + gap - (right?.box[0] ?? 0), fr.box[3]);
+    put(iso, W + gap - (iso?.box[0] ?? 0), H + gap + (iso?.box[3] ?? 0));
+    download(dxf.toString(), `${safeName()}-vistas.dxf`, "image/vnd.dxf");
+  });
+  worker.postMessage({ kind: "drawing", seq: s, features: resolveDoc(doc).features });
+}
 $("#viewsel").addEventListener("change", (e) => { const sel = e.target as HTMLSelectElement; if (sel.value) viewport.view(sel.value as ViewName); sel.value = ""; });
 document.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.addEventListener("click", () => (b.dataset.v === "fit" ? viewport.fit() : viewport.view(b.dataset.v as ViewName))));
 
@@ -3125,7 +3367,7 @@ function keysDialog() {
       )),
       h("table", {}, h("tbody", {},
         h("tr", {}, h("th", { colspan: "2" }, "Pieza elegida (clic)")),
-        row("G", "Flechas para mover"), row("R", "Aros para girar"), row("Ctrl D", "Copia al lado"), row("V", "Ocultar la pieza elegida (sin ninguna: mostrar todo)"), row("I", "Ver solo la pieza elegida"), row("Botón derecho", "Menú de la pieza"),
+        row("G", "Flechas para mover"), row("R", "Aros para girar"), row("Ctrl D", "Copia al lado"), row("P", "Empujar una cara"), row("Mayús+clic en pasos", "Elegir varios para meterlos en una carpeta"), row("V", "Ocultar la pieza elegida (sin ninguna: mostrar todo)"), row("I", "Ver solo la pieza elegida"), row("Botón derecho", "Menú de la pieza"),
         h("tr", {}, h("th", { colspan: "2" }, "Vista")),
         row("Doble clic en cara", "Boceto sobre esa cara"),
         h("tr", {}, h("th", { colspan: "2" }, "En el boceto")),
