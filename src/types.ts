@@ -450,7 +450,16 @@ export interface Doc {
   family?: Family;
   /** carpetas de la lista de pasos que están plegadas */
   folded?: string[];
+  /** Extras de la hoja del plano: vista cortada y detalle ampliado */
+  sheet?: { section?: SheetSection; detail?: SheetDetail };
+  /** Etiqueta de versión: la última vez que se exportó para imprimir (número y fecha «25-nov») */
+  label?: { n: number; date: string };
 }
+
+/** Sección A-A: «y» = corte de frente (plano paralelo a la vista de frente), «x» = de lado. at = dónde corta (mm); vacío = por el medio */
+export interface SheetSection { axis: "x" | "y"; at?: number }
+/** Detalle B: un círculo de una vista, ampliado «factor» veces. c = centro en mm de la vista */
+export interface SheetDetail { view: "front" | "top" | "section"; c: [number, number]; factor: number }
 
 /** Tabla de tamaños: qué variables cambian y sus valores en cada fila */
 export interface Family {
@@ -476,7 +485,7 @@ export interface BodyInfo {
  */
 export interface DrawingDim {
   id: string;
-  view: "front" | "top" | "right";
+  view: "front" | "top" | "right" | "section";
   kind: "h" | "v" | "a" | "d" | "r";
   a: [number, number];
   b: [number, number];
@@ -495,6 +504,9 @@ export type Resolved<T> = T extends string
     : T extends object
       ? { [K in keyof T]: Resolved<T[K]> }
       : T;
+
+/** Un trozo de la comparación de dos versiones (malla y volumen en mm³) */
+export interface ComparePart { vertices: Float32Array; normals: Float32Array; triangles: Uint32Array; volume: number }
 
 export interface BodyMesh {
   id: string;
@@ -527,8 +539,9 @@ export type WorkerIn =
   /** imagen ya pasada a grises (0 = negro, 255 = blanco), para los relieves */
   | { kind: "gray"; id: string; w: number; h: number; data: Uint8Array }
   | { kind: "export"; seq: number; features: Resolved<Feature>[]; format: "stl" | "step" | "3mf"; colors?: Record<string, string> }
-  | { kind: "drawing"; seq: number; features: Resolved<Feature>[] }
-  | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean };
+  | { kind: "drawing"; seq: number; features: Resolved<Feature>[]; section?: SheetSection }
+  | { kind: "collide"; seq: number; features: Resolved<Feature>[]; mesh: boolean }
+  | { kind: "compare"; seq: number; a: Resolved<Feature>[]; b: Resolved<Feature>[] };
 
 export type WorkerOut =
   | { kind: "ready" }
@@ -537,7 +550,8 @@ export type WorkerOut =
   | { kind: "exported"; seq: number; format: string; data: ArrayBuffer | null; error?: string }
   | { kind: "file"; id: string; error?: string; triangles?: number }
   | { kind: "drawing"; seq: number; views?: DrawingView[]; error?: string }
-  | { kind: "collide"; seq: number; clashes: Clash[]; error?: string };
+  | { kind: "collide"; seq: number; clashes: Clash[]; error?: string }
+  | { kind: "compare"; seq: number; parts?: Record<"same" | "added" | "removed", ComparePart>; error?: string };
 
 /** Dos cuerpos que se meten uno en otro */
 export interface Clash {
@@ -550,9 +564,13 @@ export interface Clash {
 
 /** Una vista de un plano 2D: trazos visibles y ocultos (SVG, en mm, Y hacia abajo) */
 export interface DrawingView {
-  name: "front" | "top" | "right" | "iso";
+  name: "front" | "top" | "right" | "iso" | "section";
   visible: string[];
   hidden: string[];
+  /** solo en la sección: triángulos de la cara cortada (se rellenan con rayado) */
+  hatch?: string;
+  /** solo en la sección: por dónde se ha cortado (para dibujar la línea A-A en la vista de arriba) */
+  cut?: { axis: "x" | "y"; at: number };
   /** caja de la vista: [xmin, ymin, xmax, ymax] */
   box: [number, number, number, number];
 }

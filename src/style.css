@@ -437,3 +437,7 @@ dialog:has(.keys) { width: min(860px, calc(100vw - 32px)); }
 #st-cloud.offline { color: var(--danger); }
 #st-cloud.on { color: var(--muted); }
 .cloud-up { display: flex; align-items: center; gap: 10px; justify-content: space-between; margin-bottom: 8px; }
+/* comparar versiones: muestras de color del aviso */
+.cmp-sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin: 0 2px; }
+.cmp-sw.add { background: #2f9e44; }
+.cmp-sw.rem { background: #e03131; }

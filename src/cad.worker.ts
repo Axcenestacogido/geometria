@@ -13,7 +13,7 @@ import { catalogPart, hexagon, type CatalogPart } from "./catalog";
 import { logoParts, heightGrid, type Gray, type P2 } from "./relief";
 /** pasos cuyo sólido conviene dibujar con menos detalle */
 const coarseIds = new Set<string>();
-import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash } from "./types";
+import type { Feature, Resolved, WorkerIn, WorkerOut, BodyMesh, Vec3, BuildResult, TextFont, DrawingView, Clash, ComparePart } from "./types";
 import interRegular from "./fonts/Inter-Regular.otf?url";
 import interBold from "./fonts/Inter-Bold.otf?url";
 import monoBold from "./fonts/JetBrainsMono-Bold.ttf?url";
@@ -60,6 +60,7 @@ function pump() {
       else if (m.kind === "export") doExport(m);
       else if (m.kind === "drawing") doDrawing(m);
       else if (m.kind === "collide") doCollide(m);
+      else if (m.kind === "compare") doCompare(m);
     }
   } finally {
     busy = false;
@@ -1259,6 +1260,40 @@ async function doExport(m: Extract<WorkerIn, { kind: "export" }>) {
 }
 
 
+/**
+ * Sección A-A: corta la pieza por un plano y la mira de frente (axis «y») o de lado (axis «x»),
+ * quitando la mitad que queda delante. La cara cortada sale aparte, en triángulos, para rayarla.
+ */
+function sectionView(all: Shape, sec: { axis: "x" | "y"; at?: number }, flat: (d: R.Drawing) => string[]): DrawingView {
+  const [[x0, y0, z0], [x1, y1, z1]] = all.boundingBox.bounds as [number[], number[]];
+  const ax = sec.axis === "y" ? 1 : 0;
+  const lo = ax === 1 ? y0 : x0, hi = ax === 1 ? y1 : x1;
+  const at = sec.at ?? (lo + hi) / 2;
+  if (!(at > lo + 1e-6 && at < hi - 1e-6)) throw new Error("el corte de la sección queda fuera de la pieza");
+  const pad = 1;
+  // se quita lo que está entre quien mira y el plano: de frente se mira hacia +Y, de lado hacia +X
+  const cutter = ax === 1
+    ? R.makeBox([x0 - pad, y0 - pad, z0 - pad], [x1 + pad, at, z1 + pad])
+    : R.makeBox([x0 - pad, y0 - pad, z0 - pad], [at, y1 + pad, z1 + pad]);
+  const half = all.cut(cutter as Shape) as Shape;
+  const { visible } = R.drawProjection(half, ax === 1 ? "front" : "right");
+  const vis = flat(visible);
+  const [[u0, v0], [u1, v1]] = visible.boundingBox.bounds;
+  // cara cortada: los triángulos de la malla que están sobre el plano. De frente u = X, de lado u = −Y; v = Z
+  const mm = half.mesh({ tolerance: 0.05, angularTolerance: 0.3 });
+  const V = mm.vertices, T = mm.triangles;
+  const on = (i: number) => Math.abs(V[i * 3 + ax] - at) < 1e-4;
+  const uv = (i: number) => {
+    const u = ax === 1 ? V[i * 3] : -V[i * 3 + 1];
+    return `${u.toFixed(3)} ${(-V[i * 3 + 2]).toFixed(3)}`;
+  };
+  const tri: string[] = [];
+  for (let t = 0; t < T.length; t += 3) {
+    if (on(T[t]) && on(T[t + 1]) && on(T[t + 2])) tri.push(`M${uv(T[t])}L${uv(T[t + 1])}L${uv(T[t + 2])}Z`);
+  }
+  return { name: "section", visible: vis, hidden: [], hatch: tri.join(""), box: [u0, -v1, u1, -v0], cut: { axis: sec.axis, at } };
+}
+
 /** Plano 2D: vistas de frente, arriba, derecha y 3D, con las líneas ocultas aparte */
 function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
   try {
@@ -1283,7 +1318,11 @@ function doDrawing(m: Extract<WorkerIn, { kind: "drawing" }>) {
       // el SVG tiene la Y hacia abajo: replicad ya la da la vuelta
       views.push({ name, visible: vis, hidden: name === "iso" ? [] : flat(hidden), box: [x0, -y1, x1, -y0] });
     }
-    post({ kind: "drawing", seq: m.seq, views });
+    let error: string | undefined;
+    if (m.section) {
+      try { views.push(sectionView(all, m.section, flat)); } catch (e) { error = "sin sección: " + msg(e); }
+    }
+    post({ kind: "drawing", seq: m.seq, views, error });
   } catch (e) {
     post({ kind: "drawing", seq: m.seq, error: msg(e) });
   }
@@ -1319,6 +1358,41 @@ function doCollide(m: Extract<WorkerIn, { kind: "collide" }>) {
     post({ kind: "collide", seq: m.seq, clashes }, clashes.flatMap((c) => (c.tris ? [c.tris.buffer] : [])));
   } catch (e) {
     post({ kind: "collide", seq: m.seq, clashes: [], error: msg(e) });
+  }
+}
+
+/**
+ * Compara dos versiones: lo que tienen en común, lo que ha crecido (está en B y no en A)
+ * y lo que ha desaparecido (estaba en A y ya no está en B).
+ */
+function doCompare(m: Extract<WorkerIn, { kind: "compare" }>) {
+  try {
+    const solid = (features: RF[]): Shape | null => {
+      const { bodies } = runFeatures(features);
+      return bodies.length ? fuseAll(bodies.map((b) => b.shape)) : null;
+    };
+    const A = solid(m.a), B = solid(m.b);
+    if (!A && !B) throw new Error("las dos versiones están vacías");
+    const empty: ComparePart = { vertices: new Float32Array(0), normals: new Float32Array(0), triangles: new Uint32Array(0), volume: 0 };
+    const part = (s: Shape | null): ComparePart => {
+      if (!s) return empty;
+      const volume = safeNum(() => R.measureVolume(s));
+      if (!(volume > 1e-3)) return empty;
+      const mm = s.mesh({ tolerance: 0.05, angularTolerance: 0.25 });
+      return { vertices: new Float32Array(mm.vertices), normals: new Float32Array(mm.normals), triangles: new Uint32Array(mm.triangles), volume };
+    };
+    const parts = {
+      same: part(A && B ? (A.intersect(B) as Shape) : null),
+      added: part(!A ? B : B ? (B.cut(A) as Shape) : null),
+      removed: part(!B ? A : A ? (A.cut(B) as Shape) : null),
+    };
+    const transfer = Object.values(parts).flatMap((p) => [p.vertices.buffer, p.normals.buffer, p.triangles.buffer]);
+    post({ kind: "compare", seq: m.seq, parts }, transfer);
+  } catch (e) {
+    post({ kind: "compare", seq: m.seq, error: msg(e) });
+  } finally {
+    // la próxima reconstrucción normal no debe aprovechar pasos de otra versión
+    stepCache = [];
   }
 }
 

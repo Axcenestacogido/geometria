@@ -14,17 +14,19 @@ import { docForRow, rowFileName, rowFromDoc, currentRow } from "./family";
 import { makeZip } from "./zip";
 import { readSvg, svgToProfiles } from "./svgimport";
 import { solveSketch, cleanConstraints, CONSTRAINT_GLYPH, CONSTRAINT_NAME } from "./constraints";
-import { Viewport, type ViewName, type GizmoDelta } from "./viewport";
+import { Viewport, type ViewName, type GizmoDelta, type MeasureItem } from "./viewport";
 import { SCREWS, SCREW_NAMES, HOLE_KIND_LABEL } from "./screws";
 import { SketchEditor, TOOL_HINT, type SketchTool } from "./sketcher";
 import { evaluate, fmt, VAR_NAME } from "./expr";
 import { planeBasis, planeFromHit, profileLoop, toWorld, uid } from "./geom";
 import { edgeShapes } from "./edgeloops";
+import { planesAngle } from "./measure";
 import { Dxf, addSvgPaths } from "./dxf";
 import { cloud, docFileIds, type CloudStatus } from "./cloud";
 import {
   emptyDoc, exampleDoc, newFeature, resolveDoc, History, storage, isDoc,
   FEATURE_LABEL, FEATURE_ICON, AUTO_EVERY_MS, myFit, setMyFit, type ResolveOut,
+  bumpLabel, fillLabel, currentLabel, hasLabel,
 } from "./state";
 
 // ======================================================================
@@ -86,6 +88,7 @@ $("#app").innerHTML = `
     <div class="menu-h">Versiones</div>
     <button data-a="version">Guardar versión…<kbd>Ctrl S</kbd><small>Una foto de cómo está ahora, con nombre</small></button>
     <button data-a="history">Historial de versiones…<small>Volver a como estaba antes</small></button>
+    <button data-a="compare">Comparar versiones…<small>Ver en color qué ha crecido y qué ha desaparecido</small></button>
     <div class="menu-h">Ajustes de la pieza</div>
     <button data-a="family">Familia de tamaños…<small>La misma pieza en varias medidas; exportarlas todas</small></button>
     <button data-a="fit">Mi holgura…<small>La que encaja bien en tu impresora</small></button>
@@ -183,6 +186,10 @@ const worker = new Worker(new URL("./cad.worker.ts", import.meta.url), { type: "
 const exportWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "exported" }>) => void>();
 const collideWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "collide" }>) => void>();
 let collideSeq = 0;
+const compareWaiters = new Map<number, (m: Extract<WorkerOut, { kind: "compare" }>) => void>();
+/** Comparación en pantalla: nombres de las dos versiones y volúmenes (mm³) que han cambiado */
+let comparing: { a: string; b: string; added: number; removed: number } | null = null;
+let compareSeq = 0;
 /** Pregunta al motor qué cuerpos se meten unos en otros con estos pasos */
 function askCollide(features: Resolved<Feature>[], mesh: boolean) {
   return new Promise<Extract<WorkerOut, { kind: "collide" }>>((res) => {
@@ -233,6 +240,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOut>) => {
   } else if (m.kind === "collide") {
     collideWaiters.get(m.seq)?.(m);
     collideWaiters.delete(m.seq);
+  } else if (m.kind === "compare") {
+    compareWaiters.get(m.seq)?.(m);
+    compareWaiters.delete(m.seq);
   } else if (m.kind === "drawing") {
     drawingWaiters.get(m.seq)?.(m);
     drawingWaiters.delete(m.seq);
@@ -354,6 +364,7 @@ function scheduleThumb() {
 }
 
 function setDoc(d: Doc, id = docId, resetHistory = true) {
+  if (comparing) stopCompare();
   doc = d;
   docId = id;
   active = null;
@@ -1694,6 +1705,16 @@ function renderTextProps(sec: HTMLElement, f: TextFeature) {
   ta.addEventListener("input", () => { f.text = ta.value; changed(false); });
   ta.addEventListener("change", () => changed(true));
   sec.append(h("div", { class: "field" }, h("label", {}, "Texto"), ta));
+  if (hasLabel(f.text)) {
+    const lab = currentLabel(doc);
+    sec.append(h("div", { class: "msg info" },
+      "Etiqueta de versión: ahora pone ", h("b", {}, fillLabel(f.text, lab)), ". ",
+      "Cada vez que exportes en 3MF o STL para imprimir, el número sube solo y coge la fecha de ese día. ",
+      "Huecos: {v} = v3, {n} = 3, {fecha} = 25-nov.",
+      doc.label ? h("button", { class: "btn small", onclick: () => { delete doc.label; changed(true, true); } }, "Volver a v1") : null));
+  } else {
+    sec.append(h("button", { class: "btn small", title: "Graba «v1 · 25-nov» y sube solo al exportar para imprimir", onclick: () => { f.text = "{v} · {fecha}"; changed(true, true); } }, "🏷 Usar como etiqueta de versión"));
+  }
   const fonts: [TextFont, string][] = [["sans-bold", "Inter negrita (recomendada)"], ["sans", "Inter normal"], ["mono", "JetBrains Mono (letras del mismo ancho)"]];
   sec.append(selectField("Letra", f.font, fonts, (v) => (f.font = v as TextFont)));
   sec.append(exprField("Alto de letra", () => f.size, (v) => (f.size = v), k("size")));
@@ -2363,18 +2384,19 @@ function renderBanner() {
     b.hidden = false;
     b.innerHTML = "";
     b.append("Haz clic en una cara plana de la pieza", h("button", { class: "btn small", onclick: () => { pickingFace = false; viewport.pickMode = "none"; if (f?.type === "sketch") $("#sketch").classList.add("on"); renderBanner(); } }, "Cancelar"));
+  } else if (comparing) {
+    b.hidden = false;
+    b.innerHTML = "";
+    const c = comparing, cm3 = (v: number) => fmtEs(v / 1000, v < 1000 ? 2 : 1) + " cm³";
+    const swatch = (cls: string) => h("i", { class: `cmp-sw ${cls}` });
+    if (c.added < 1e-3 && c.removed < 1e-3) b.append(`«${c.a}» y «${c.b}» son iguales por fuera`);
+    else b.append(h("span", {}, `«${c.a}» → «${c.b}»: `, swatch("add"), ` ha crecido ${cm3(c.added)}  ·  `, swatch("rem"), ` ha desaparecido ${cm3(c.removed)}`));
+    b.append(h("button", { class: "btn small", onclick: stopCompare }, "Terminar"));
   } else if (measuring) {
     b.hidden = false;
     b.innerHTML = "";
-    const pts = viewport.measurePts;
-    let txt = "Medir: haz clic en dos puntos (vértices, aristas o caras)";
-    if (pts.length === 1) txt = "Ahora el segundo punto";
-    if (pts.length === 2) {
-      const [a, c] = pts;
-      const dx = c[0] - a[0], dy = c[1] - a[1], dz = c[2] - a[2];
-      txt = `Distancia ${fmt(Math.hypot(dx, dy, dz))} mm  ·  X ${fmt(Math.abs(dx))}  Y ${fmt(Math.abs(dy))}  Z ${fmt(Math.abs(dz))}`;
-    }
-    b.append(txt, h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
+    b.append(measureText(viewport.measureItems));
+    b.append(h("button", { class: "btn small", onclick: stopMeasure }, "Terminar"));
   } else if (f && (f.type === "fillet" || f.type === "chamfer")) {
     b.hidden = false;
     b.textContent = pickFacesForEdges ? `${f.name}: elige caras con un clic` : `${f.name}: elige aristas con un clic`;
@@ -2496,7 +2518,7 @@ const nn = (...xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement =>
 function closeMenu() { document.querySelectorAll(".ctxmenu").forEach((x) => x.remove()); }
 function bodyMenu(id: string | null, x: number, y: number, face: { point: Vec3; normal: Vec3 } | null = null) {
   closeMenu();
-  if (active || explode || measuring) return;
+  if (active || explode || measuring || comparing) return;
   const b = id ? build?.bodies.find((q) => q.id === id) : undefined;
   const item = (label: string, key: string, run: () => void, cls = "") =>
     h("button", { class: `ctx-i ${cls}`, onclick: () => { closeMenu(); run(); } }, h("span", {}, label), key ? h("kbd", {}, key) : null);
@@ -2518,6 +2540,7 @@ function bodyMenu(id: string | null, x: number, y: number, face: { point: Vec3; 
       item("⟳ Girar", "R", () => pick("rotate")),
       item("⧉ Hacer una copia", "Ctrl D", () => { pick("translate"); ($("#selpanel").querySelector("[data-copy]") as HTMLButtonElement | null)?.click(); }),
       face ? item("⇕ Empujar esta cara", "", () => pushFace(face)) : null,
+      face ? item("🏷 Grabar etiqueta de versión aquí", "", () => labelFace(b.id, face)) : null,
       colorRow,
       h("hr"),
       item("◌ Ocultar", "V", () => hideBody(b.id)),
@@ -2556,8 +2579,22 @@ function pushFace(face: { point: Vec3; normal: Vec3 }) {
   changed(true, true);
 }
 
+/** Texto «v1 · 25-nov» grabado en la cara: sube solo cada vez que exportas para imprimir */
+function labelFace(bodyId: string, face: { point: Vec3; normal: Vec3 }) {
+  const f = newFeature(doc, "text") as TextFeature;
+  f.name = "Etiqueta de versión";
+  f.text = "{v} · {fecha}";
+  f.size = "5"; f.depth = "0.6"; f.op = "cut";
+  if ((build?.bodies.length ?? 0) > 1) f.target = bodyId;
+  selBody = null;
+  doc.features.push(f);
+  setActive(f.id);
+  viewport.events.onFacePick?.(face.point, face.normal);
+  toast("Etiqueta puesta. Al exportar en 3MF o STL pasará a la versión siguiente con la fecha del día.");
+}
+
 viewport.events.onBodyClick = (id) => {
-  if (active || explode || measuring) return;
+  if (active || explode || measuring || comparing) return;
   selBody = id;
   renderSelPanel();
 };
@@ -2786,7 +2823,10 @@ const safeName = () => (doc.name || "pieza").replace(/[^\wáéíóúñÁÉÍÓÚ
 function doExport(format: "stl" | "step" | "3mf") {
   if (!engineReady) return toast("El motor aún está cargando");
   const s = ++seq;
-  toast("Preparando el archivo…");
+  // para imprimir (3MF/STL): la etiqueta de versión sube sola (v3 → v4) y coge la fecha de hoy
+  const lab = format !== "step" ? bumpLabel(doc) : null;
+  if (lab) changed(true);
+  toast(lab ? `Preparando el archivo… La etiqueta grabada será «${fillLabel("{v} · {fecha}", lab)}»` : "Preparando el archivo…");
   exportWaiters.set(s, (m) => {
     if (!m.data) return toast("No se pudo exportar: " + (m.error ?? ""));
     const mime = { stl: "model/stl", step: "model/step", "3mf": "model/3mf" }[format];
@@ -2797,7 +2837,7 @@ function doExport(format: "stl" | "step" | "3mf") {
 }
 
 // ---------- plano 2D con medidas ----------
-const VIEW_LABEL: Record<DrawingView["name"], string> = { front: "Frente", top: "Arriba", right: "Derecha", iso: "3D" };
+const VIEW_LABEL: Record<DrawingView["name"], string> = { front: "Frente", top: "Arriba", right: "Derecha", iso: "3D", section: "Sección A-A" };
 const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /** Hoja A4 apaisada (en mm) con las vistas, las medidas generales, tus cotas y el cajetín */
@@ -2818,7 +2858,17 @@ function drawingSheet(views: DrawingView[], snaps: Partial<Record<DrawingView["n
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}mm" height="${H}mm" font-family="Inter, system-ui, sans-serif">`);
   out.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="#fff"/>`);
   out.push(`<rect x="${M / 2}" y="${M / 2}" width="${W - M}" height="${H - M}" fill="none" stroke="#000" stroke-width="0.5"/>`);
-  const cells: [DrawingView["name"], number, number][] = [["front", M, M], ["right", M + cellW + 10, M], ["top", M, M + cellH], ["iso", M + cellW + 10, M + cellH]];
+  // con sección, va en el sitio de la vista de la derecha; con detalle, en el de la 3D
+  const detail = doc.sheet?.detail && by[doc.sheet.detail.view] ? doc.sheet.detail : null;
+  const cells: [DrawingView["name"] | "detail", number, number][] = [["front", M, M], [by.section ? "section" : "right", M + cellW + 10, M], ["top", M, M + cellH], [detail ? "detail" : "iso", M + cellW + 10, M + cellH]];
+  /** rayado de la cara cortada, con la separación medida en la hoja (no en la pieza) */
+  const hatchSvg = (v: DrawingView, k: number, id: string) => {
+    if (!v.hatch) return "";
+    const g = 1.4 / k;
+    return `<defs><pattern id="ray-${id}" patternUnits="userSpaceOnUse" width="${g}" height="${g}" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="${g}" stroke="#000" stroke-width="${0.13 / k}"/></pattern>` +
+      `<clipPath id="cp-${id}"><path d="${v.hatch}"/></clipPath></defs>` +
+      `<rect x="${v.box[0]}" y="${v.box[1]}" width="${v.box[2] - v.box[0]}" height="${v.box[3] - v.box[1]}" fill="url(#ray-${id})" stroke="none" clip-path="url(#cp-${id})"/>`;
+  };
   const dim = (x1: number, y1: number, x2: number, y2: number, txt: string, vertical: boolean) => {
     const a = 1.6;
     const parts = [`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#000" stroke-width="0.18"/>`];
@@ -2834,6 +2884,28 @@ function drawingSheet(views: DrawingView[], snaps: Partial<Record<DrawingView["n
   const ext = (x1: number, y1: number, x2: number, y2: number) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#000" stroke-width="0.13"/>`;
   const n = (v: number) => fmtEs(v, Math.abs(v - Math.round(v)) < 0.005 ? 0 : 2);
   for (const [name, cx, cy] of cells) {
+    if (name === "detail") {
+      // detalle B: un círculo de otra vista, ampliado
+      const d = detail!, src = by[d.view]!, sx = xf[d.view];
+      const ks = sc * d.factor, rr = (cellH - 16) / 2;
+      const rw = rr / ks; // radio en mm de la pieza
+      const dsc = ks >= 1 ? `${fmtEs(ks, ks % 1 ? 1 : 0)}:1` : `1:${fmtEs(1 / ks, 0)}`;
+      out.push(`<text x="${cx + 2}" y="${cy + 5}" font-size="3.4" font-weight="700">Detalle B (escala ${dsc})</text>`);
+      const ccx = cx + cellW / 2, ccy = cy + 6 + (cellH - 6) / 2;
+      out.push(`<defs><clipPath id="cp-det"><circle cx="${d.c[0]}" cy="${d.c[1]}" r="${rw}"/></clipPath></defs>`);
+      out.push(`<g transform="translate(${ccx.toFixed(3)} ${ccy.toFixed(3)}) scale(${ks}) translate(${-d.c[0]} ${-d.c[1]})" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round"><g clip-path="url(#cp-det)">`);
+      out.push(hatchSvg(src, ks, "det"));
+      for (const p of src.hidden) out.push(`<path d="${p}" stroke-width="${0.18 / ks}" stroke-dasharray="${1.2 / ks} ${0.8 / ks}" stroke="#555"/>`);
+      for (const p of src.visible) out.push(`<path d="${p}" stroke-width="${0.35 / ks}"/>`);
+      out.push(`</g></g>`, `<circle cx="${ccx}" cy="${ccy}" r="${rr}" fill="none" stroke="#000" stroke-width="0.25"/>`);
+      // y el círculo B en la vista de donde sale
+      if (sx) {
+        const px = sx.ox + d.c[0] * sx.k, py = sx.oy + d.c[1] * sx.k, pr = rw * sx.k;
+        out.push(`<circle cx="${px}" cy="${py}" r="${pr}" fill="none" stroke="#000" stroke-width="0.25" stroke-dasharray="3 1"/>`,
+          `<text x="${px + pr * 0.75 + 1}" y="${py - pr * 0.75 - 1}" font-size="3.6" font-weight="700">B</text>`);
+      }
+      continue;
+    }
     const v = by[name];
     out.push(`<text x="${cx + 2}" y="${cy + 5}" font-size="3.4" font-weight="700">${VIEW_LABEL[name]}</text>`);
     if (!v) continue;
@@ -2843,15 +2915,36 @@ function drawingSheet(views: DrawingView[], snaps: Partial<Record<DrawingView["n
     const tr = `translate(${ox.toFixed(3)} ${oy.toFixed(3)}) scale(${k})`;
     xf[name] = { ox, oy, k, cell: [cx, cy, cx + cellW, cy + cellH] };
     out.push(`<g transform="${tr}" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">`);
+    out.push(hatchSvg(v, k, name));
     for (const d of v.hidden) out.push(`<path d="${d}" stroke-width="${0.18 / k}" stroke-dasharray="${1.2 / k} ${0.8 / k}" stroke="#555"/>`);
     for (const d of v.visible) out.push(`<path d="${d}" stroke-width="${0.35 / k}"/>`);
     out.push(`</g>`);
     if (name === "iso") continue;
+    // la línea de corte A-A sobre la vista de arriba, con flechas hacia donde se mira
+    const cut = by.section?.cut;
+    if (name === "top" && cut) {
+      const X = (x: number) => ox + x * k, Y = (y: number) => oy + y * k;
+      const e = 3; // lo que sobresale de la pieza (mm de hoja)
+      const [a, b] = cut.axis === "y"
+        ? [[X(v.box[0]) - e, Y(cut.at)], [X(v.box[2]) + e, Y(cut.at)]]
+        : [[X(cut.at), Y(v.box[1]) - e], [X(cut.at), Y(v.box[3]) + e]];
+      const [dx, dy] = cut.axis === "y" ? [0, 1] : [1, 0]; // hacia donde mira la sección
+      out.push(`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#000" stroke-width="0.25" stroke-dasharray="6 1.5 1 1.5"/>`);
+      for (const p of [a, b]) {
+        const tip = [p[0] + dx * 4, p[1] + dy * 4];
+        out.push(`<line x1="${p[0]}" y1="${p[1]}" x2="${tip[0]}" y2="${tip[1]}" stroke="#000" stroke-width="0.35"/>`,
+          `<path d="M${tip[0]} ${tip[1]} l${-dx * 1.6 + dy * 0.6} ${-dy * 1.6 + dx * 0.6} l${-dy * 1.2} ${-dx * 1.2} Z" fill="#000"/>`,
+          // la letra, pasada la punta de la flecha (así no pisa las medidas generales)
+          `<text x="${tip[0] + dx * 2.6}" y="${tip[1] + dy * 3.6 + dx * 1.3}" font-size="3.6" font-weight="700" text-anchor="middle">A</text>`);
+      }
+    }
     // medidas generales: ancho abajo, alto a la derecha
     const x0 = ox + v.box[0] * k, x1 = ox + v.box[2] * k, y0 = oy + v.box[1] * k, y1 = oy + v.box[3] * k;
-    const gy = y1 + 6, gx = x1 + 6;
+    // con línea de corte A-A en esta vista, la medida de ese lado se aparta para no pisar la flecha
+    const cutHere = name === "top" ? by.section?.cut?.axis : undefined;
+    const gy = y1 + (cutHere === "x" ? 13 : 6), gx = x1 + (cutHere === "y" ? 13 : 6);
     out.push(ext(x0, y1 + 1, x0, gy + 1), ext(x1, y1 + 1, x1, gy + 1), dim(x0, gy, x1, gy, n(w), false));
-    if (name !== "right") out.push(ext(x1 + 1, y0, gx + 1, y0), ext(x1 + 1, y1, gx + 1, y1), dim(gx, y0, gx, y1, n(hh), true));
+    if (name !== "right" && name !== "section") out.push(ext(x1 + 1, y0, gx + 1, y0), ext(x1 + 1, y1, gx + 1, y1), dim(gx, y0, gx, y1, n(hh), true));
     // tus cotas: en naranja las que se han quedado sueltas porque la pieza cambió
     for (const dd of doc.dims ?? []) {
       if (dd.view !== name) continue;
@@ -2877,7 +2970,7 @@ function drawingSheet(views: DrawingView[], snaps: Partial<Record<DrawingView["n
   return { svg: out.join(""), xf, dimAt };
 }
 
-type DimTool = "none" | "h" | "v" | "a" | "d" | "r" | "del";
+type DimTool = "none" | "h" | "v" | "a" | "d" | "r" | "del" | "det";
 const DIM_TOOLS: [DimTool, string, string][] = [
   ["h", "↔ Horizontal", "Toca dos puntos y luego dónde va la línea de cota"],
   ["v", "↕ Vertical", "Toca dos puntos y luego dónde va la línea de cota"],
@@ -2885,8 +2978,10 @@ const DIM_TOOLS: [DimTool, string, string][] = [
   ["d", "Ø Diámetro", "Toca el borde de un círculo, por el lado donde quieres el texto"],
   ["r", "R Radio", "Toca el borde de un arco o círculo, por el lado donde quieres el texto"],
   ["del", "✕ Quitar cota", "Toca el número de la cota que quieres quitar"],
+  ["det", "🔍 Detalle ampliado", "Toca la zona pequeña que quieres ver en grande (sale en el sitio de la vista 3D)"],
 ];
 
+let drawingKeyOff: (() => void) | null = null;
 function drawingDialog() {
   if (!engineReady) return toast("El motor aún está cargando");
   if (!build?.bodies.length) return toast("Todavía no hay ninguna pieza que dibujar");
@@ -2903,6 +2998,7 @@ function drawingDialog() {
     rebuild();
     if (!m.views?.length) { preview.innerHTML = ""; preview.append(h("div", { class: "msg err" }, "No se pudo dibujar: " + (m.error ?? "sin vistas"))); return; }
     const views = m.views;
+    if (m.error) toast(m.error);
     const snaps: Partial<Record<DrawingView["name"], Snaps>> = {};
     for (const v of views) if (v.name !== "iso") snaps[v.name] = snapsFromPaths([...v.visible, ...v.hidden]);
     let sheet = drawingSheet(views, snaps);
@@ -2925,6 +3021,34 @@ function drawingDialog() {
       draw();
     };
     for (const [t, label] of DIM_TOOLS) dimbar.append(h("button", { class: "btn small", "data-t": t, onclick: () => setTool(t) }, label));
+    // sección A-A y detalle B (se guardan con la pieza)
+    const secNow = views.find((v) => v.name === "section")?.cut;
+    const secSel = h("select", {}, ...([["", "Sin sección"], ["y", "Cortada de frente (A-A)"], ["x", "Cortada de lado (A-A)"]] as const)
+      .map(([v, l]) => h("option", { value: v, ...(v === (doc.sheet?.section?.axis ?? "") ? { selected: "" } : {}) }, l))) as HTMLSelectElement;
+    secSel.addEventListener("change", () => {
+      doc.sheet ??= {};
+      if (secSel.value) doc.sheet.section = { axis: secSel.value as "x" | "y" };
+      else { delete doc.sheet.section; if (doc.sheet.detail?.view === "section") delete doc.sheet.detail; }
+      changed(true);
+      drawingDialog();
+    });
+    const atIn = h("input", { type: "number", step: "0.5", class: "num", title: "Dónde corta (mm)", value: secNow ? fmt(Math.round(secNow.at * 100) / 100) : "" }) as HTMLInputElement;
+    atIn.style.width = "5.5em";
+    atIn.addEventListener("change", () => {
+      const v = Number(atIn.value.replace(",", "."));
+      if (!doc.sheet?.section || !Number.isFinite(v)) return;
+      doc.sheet.section.at = v;
+      changed(true);
+      drawingDialog();
+    });
+    const facSel = h("select", { title: "Cuántas veces más grande" }, ...[2, 3, 4, 5, 8].map((f) => h("option", { value: String(f), ...(f === (doc.sheet?.detail?.factor ?? 4) ? { selected: "" } : {}) }, `×${f}`))) as HTMLSelectElement;
+    facSel.addEventListener("change", () => { if (doc.sheet?.detail) { doc.sheet.detail.factor = Number(facSel.value); changed(true); draw(); } });
+    const sheetbar = h("div", { class: "dimbar" },
+      h("label", { class: "inline" }, "Sección ", secSel),
+      doc.sheet?.section ? h("label", { class: "inline" }, secNow?.axis === "x" ? "en X = " : "en Y = ", atIn, " mm") : null,
+      doc.sheet?.detail ? h("label", { class: "inline" }, "Detalle ", facSel) : null,
+      doc.sheet?.detail ? h("button", { class: "btn small", onclick: () => { delete doc.sheet!.detail; changed(true); drawingDialog(); } }, "Quitar detalle") : null);
+    dimbar.before(sheetbar);
     // del punto de la pantalla a mm de la hoja y de la vista
     const where = (e: PointerEvent) => {
       const svg = preview.querySelector("svg") as SVGSVGElement | null;
@@ -2933,7 +3057,7 @@ function drawingDialog() {
       const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
       const sheetP: [number, number] = [pt.x, pt.y];
       const mmPerPx = 1 / ctm.a;
-      for (const name of ["front", "top", "right"] as const) {
+      for (const name of ["front", "top", "right", "section"] as const) {
         const x = sheet.xf[name];
         if (!x) continue;
         const [x0, y0, x1, y1] = x.cell;
@@ -2982,6 +3106,14 @@ function drawingDialog() {
       if (tool === "none") return;
       const w = where(e as PointerEvent);
       if (!w) return;
+      if (tool === "det") {
+        if (!w.view || !w.p) return toast("Toca dentro de una vista (frente, arriba o la sección)");
+        if (w.view === "right") return toast("El detalle se saca del frente, de arriba o de la sección");
+        (doc.sheet ??= {}).detail = { view: w.view, c: [Math.round(w.p[0] * 10) / 10, Math.round(w.p[1] * 10) / 10], factor: doc.sheet.detail?.factor ?? 4 };
+        changed(true);
+        drawingDialog();
+        return;
+      }
       if (tool === "del") {
         let best = "", bd = 6 / ((preview.querySelector("svg") as SVGSVGElement).getScreenCTM()?.a || 1) + 3;
         for (const d of sheet.dimAt) { const dd = Math.hypot(d.at[0] - w.sheetP[0], d.at[1] - w.sheetP[1]); if (dd < bd) { bd = dd; best = d.id; } }
@@ -3008,8 +3140,11 @@ function drawingDialog() {
       e.preventDefault(); // que no cierre la ventana
       if (picks) { picks = null; const g = ui(); if (g) g.innerHTML = ""; } else setTool(tool);
     };
+    // al rehacer la hoja (sección o detalle nuevos) se quita el oyente de la anterior
+    drawingKeyOff?.();
     dlg.addEventListener("keydown", onKey);
-    dlg.addEventListener("close", () => dlg.removeEventListener("keydown", onKey), { once: true });
+    drawingKeyOff = () => dlg.removeEventListener("keydown", onKey);
+    dlg.addEventListener("close", () => { drawingKeyOff?.(); drawingKeyOff = null; }, { once: true });
     draw();
     actions.append(
       h("button", { class: "btn primary", onclick: () => {
@@ -3028,7 +3163,7 @@ function drawingDialog() {
       h("button", { class: "btn", onclick: () => dlg.close() }, "Cerrar"),
     );
   });
-  worker.postMessage({ kind: "drawing", seq: s, features: resolveDoc(doc).features });
+  worker.postMessage({ kind: "drawing", seq: s, features: resolveDoc(doc).features, section: doc.sheet?.section });
 }
 $("#drawing").addEventListener("click", drawingDialog);
 window.addEventListener("afterprint", () => { $("#printarea").innerHTML = ""; });
@@ -3147,6 +3282,7 @@ function historyDialog() {
         dlg.close();
         toast(`Has vuelto a «${v.name}»`);
       } }, "Volver a esta"),
+      same ? null : h("button", { class: "btn small", title: "Ver en color qué ha cambiado desde esta versión", onclick: () => { dlg.close(); startCompare(String(v.t), "now"); } }, "Comparar"),
       h("button", { class: "btn small", onclick: () => {
         const d = JSON.parse(v.doc) as Doc;
         d.name = `${d.name} (${v.name})`;
@@ -3179,6 +3315,7 @@ function fileAction(a: string) {
   else if (a === "open") openDialog();
   else if (a === "version") saveVersionDialog();
   else if (a === "history") historyDialog();
+  else if (a === "compare") compareDialog();
   else if (a === "templates") templatesDialog();
   else if (a === "fit") fitDialog();
   else if (a === "family") familyDialog();
@@ -3291,6 +3428,29 @@ renderPerspBtn();
 if (!viewport.perspective3d) viewport.view("iso");
 
 // medir
+/** Lo que dice la barra de medir según lo que hayas tocado */
+function measureText(items: MeasureItem[]): string {
+  const es = (v: number, d: number) => v.toLocaleString("es-ES", { maximumFractionDigits: d });
+  const deg = (v: number) => `${es(v, 1)}°`;
+  const mm = (v: number) => `${es(v, 2)} mm`;
+  const [a, c] = items;
+  if (!a) return "Medir: clic en dos puntos, en dos caras (ángulo) o en un círculo o agujero (diámetro)";
+  if (a.kind === "circle") {
+    const { r, sweep } = a.circle;
+    return sweep > 359 ? `Círculo Ø ${mm(2 * r)}  ·  radio ${mm(r)}` : `Arco de radio ${mm(r)}  ·  ${deg(sweep)}  ·  Ø ${mm(2 * r)}`;
+  }
+  if (a.kind === "face" && a.face.kind === "cylinder") {
+    if (!a.face.full) return `Cara curva de radio ${mm(a.face.r)}  ·  Ø ${mm(2 * a.face.r)}`;
+    return `${a.face.hole ? "Agujero" : "Cilindro"} Ø ${mm(2 * a.face.r)}  ·  radio ${mm(a.face.r)}`;
+  }
+  if (!c) return a.kind === "face" && a.face.kind === "plane" ? "Cara plana: clic en otra cara para el ángulo, o en un punto para la distancia" : "Ahora el segundo punto";
+  if (a.kind === "face" && c.kind === "face" && a.face.kind === "plane" && c.face.kind === "plane") {
+    const r = planesAngle(a.face.normal, a.p, c.face.normal, c.p);
+    return r.gap !== null ? `Caras paralelas, separadas ${mm(r.gap)}` : `Ángulo entre caras ${deg(r.angle)}` + (Math.abs(r.angle - 90) > 0.05 ? `  ·  (${deg(180 - r.angle)} por el otro lado)` : "");
+  }
+  const dx = c.p[0] - a.p[0], dy = c.p[1] - a.p[1], dz = c.p[2] - a.p[2];
+  return `Distancia ${fmt(Math.hypot(dx, dy, dz))} mm  ·  X ${fmt(Math.abs(dx))}  Y ${fmt(Math.abs(dy))}  Z ${fmt(Math.abs(dz))}`;
+}
 let measuring = false;
 function startMeasure() {
   if (active) setActive(null);
@@ -3300,6 +3460,64 @@ function startMeasure() {
   $("#measure").classList.add("on");
   renderBanner();
 }
+// ---------- comparar dos versiones ----------
+
+/** Elegir qué dos versiones comparar (la de antes y la de después) */
+function compareDialog() {
+  const list = storage.versions(docId);
+  if (!list.length) return toast("Aún no hay versiones guardadas de esta pieza. Usa Archivo → Guardar versión.");
+  const dlg = $("#dlg") as HTMLDialogElement;
+  dlg.innerHTML = "";
+  const opts = (def: string) => [
+    h("option", { value: "now", ...(def === "now" ? { selected: "" } : {}) }, "Ahora (la que estás editando)"),
+    ...list.map((v) => h("option", { value: String(v.t), ...(def === String(v.t) ? { selected: "" } : {}) },
+      `${v.name} · ${new Date(v.t).toLocaleString("es-ES", { dateStyle: "short", timeStyle: "short" })}`)),
+  ];
+  const cur = JSON.stringify(doc);
+  const before = list.find((v) => v.doc !== cur) ?? list[0];
+  const selA = h("select", {}, ...opts(String(before.t))) as HTMLSelectElement;
+  const selB = h("select", {}, ...opts("now")) as HTMLSelectElement;
+  dlg.append(h("h2", {}, "Comparar versiones"),
+    h("p", { class: "empty" }, "Se ven las dos a la vez: en verde lo que ha crecido, en rojo lo que ha desaparecido y en gris transparente lo que sigue igual."),
+    h("div", { class: "field" }, h("label", {}, "Antes"), selA),
+    h("div", { class: "field" }, h("label", {}, "Después"), selB),
+    h("div", { class: "t-right" }, h("button", { class: "btn", onclick: () => dlg.close() }, "Cancelar"), " ",
+      h("button", { class: "btn primary", onclick: () => { if (selA.value === selB.value) return toast("Elige dos versiones distintas"); dlg.close(); startCompare(selA.value, selB.value); } }, "Comparar")));
+  dlg.showModal();
+}
+
+function startCompare(aKey: string, bKey: string) {
+  if (!engineReady) return toast("El motor aún está cargando");
+  const pick = (k: string): { d: Doc; name: string } | null => {
+    if (k === "now") return { d: doc, name: "ahora" };
+    const v = storage.versions(docId).find((x) => String(x.t) === k);
+    if (!v) return null;
+    try { return { d: JSON.parse(v.doc) as Doc, name: v.name }; } catch { return null; }
+  };
+  const A = pick(aKey), B = pick(bKey);
+  if (!A || !B) return toast("No encuentro esa versión");
+  if (measuring) stopMeasure();
+  closeMenu();
+  if (active) setActive(null);
+  selBody = null; renderSelPanel();
+  toast("Comparando…");
+  const s = ++compareSeq;
+  compareWaiters.set(s, (m) => {
+    rebuild(); // el motor vuelve a la pieza de ahora
+    if (!m.parts) return toast("No se pudo comparar: " + (m.error ?? ""));
+    comparing = { a: A.name, b: B.name, added: m.parts.added.volume, removed: m.parts.removed.volume };
+    viewport.setCompare(m.parts);
+    renderBanner();
+  });
+  worker.postMessage({ kind: "compare", seq: s, a: resolveDoc(A.d).features, b: resolveDoc(B.d).features });
+}
+
+function stopCompare() {
+  comparing = null;
+  viewport.setCompare(null);
+  renderBanner();
+}
+
 function stopMeasure() {
   measuring = false;
   viewport.clearMeasure();

@@ -41,7 +41,8 @@ cada noche. Sin conexión se sigue trabajando: lo pendiente se sube al volver.
 | **Redondear, desfase y quitar tramo** | En el boceto: redondea una esquina (dos tramos que se tocan) o todas las de un contorno, hace una copia paralela hacia dentro o fuera, y quita un tramo para recortar. |
 | **Imagen de referencia** | Cada boceto puede llevar una foto o plano de fondo, con su ancho real en mm y su opacidad, para calcar encima. También se ve en la vista 3D. Va dentro del proyecto `.json`. |
 | **Cotas a tu elección** | En el plano 2D: horizontal, vertical, alineada, diámetro y radio. Se enganchan a esquinas, medios de línea y centros; se guardan con la pieza y salen en naranja si la pieza cambia y ya no coinciden. |
-| **Historial de versiones** | Archivo → Guardar versión (con nombre) y una automática cada 10 minutos de trabajo. Puedes volver a cualquiera o abrirla aparte. |
+| **Historial de versiones** | Archivo → Guardar versión (con nombre) y una automática cada 10 minutos de trabajo. Puedes volver a cualquiera o abrirla aparte. **Comparar versiones**: las dos a la vez en 3D, en verde lo que ha crecido y en rojo lo que ha desaparecido, con los cm³. |
+| **Etiqueta de versión** | Clic derecho en una cara → «Grabar etiqueta de versión aquí» (o en un Texto, «Usar como etiqueta»): graba «v3 · 25-nov» y sube sola cada vez que exportas en 3MF o STL. Huecos: {v}, {n}, {fecha}. |
 | **Mis piezas** | Galería con miniatura de cada pieza, buscador, abrir, duplicar y borrar. |
 | **Unión (ensamblaje)** | Bisagra (gira alrededor de un eje) o guía (desliza), con deslizador entre mínimo y máximo. «Recorrer y buscar choques» la mueve de punta a punta y dice dónde choca algo. Plantilla «Caja con tapa abatible». |
 | **Choques entre cuerpos** | En la información de la pieza: dice qué cuerpos se meten uno en otro y pinta la zona en rojo. Tocarse no cuenta. |
@@ -64,10 +65,10 @@ cada noche. Sin conexión se sigue trabajando: lo pendiente se sube al volver.
 | **DXF** | Exportar → DXF: las vistas (frente, arriba, derecha y 3D, aristas ocultas en otra capa) o el boceto abierto, en mm y a escala 1:1. Para Rhino, AutoCAD, LibreCAD, corte láser o CNC. |
 | **Carpetas de pasos** | Mayús+clic en la lista de pasos para elegir varios y «Meter en una carpeta». Se pliega con un clic, se renombra con doble clic y se puede apagar entera. Solo ordena la lista: no cambia la pieza. |
 | **Corte** | Corta la vista con un plano X, Y o Z que mueves con una barra, para ver el interior. Solo cambia la vista, no la pieza. |
-| **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. |
+| **Plano** | Hoja A4 con las vistas de frente, arriba, derecha y 3D, aristas ocultas en discontinua, medidas generales, escala y cajetín. Se imprime o se guarda como PDF desde el navegador, o se descarga en SVG. Opcional: sección A-A rayada (de frente o de lado, cortando por donde digas) y detalle B ampliado (×2 a ×8) de una zona pequeña. |
 | **Colores** | En «Tu pieza», un color para cada cuerpo. Se ve en la vista y se guarda en el 3MF (cada cuerpo, un objeto con su color) para asignar filamentos del AMS. |
 | **Móvil** | La vista 3D ocupa toda la pantalla, con botones flotantes a los lados (medir, corte, plano, vistas) y un dock abajo (Añadir, Pasos, Editar, Variables) que abre paneles desde abajo. En el boceto, la barra de herramientas va abajo y se usa con dos dedos para zoom y mover. |
-| **Medir** | Distancia entre vértices, aristas o caras, con X, Y, Z por separado. |
+| **Medir** | Distancia entre vértices, aristas o caras, con X, Y, Z por separado. Con un clic: diámetro de un círculo o de un agujero, radio de un arco o de una cara curva. Dos caras planas: ángulo entre ellas, o la separación si son paralelas. |
 | **Tu pieza** | Tamaño, volumen, peso en PLA/PETG y metros de filamento. |
 | **Variables** | `grosor = 3` y luego escribes `grosor * 2` en cualquier medida. Admite `+ - * / ^ ( )`, `sqrt`, `sin`, `cos`, `tan` (en grados), `abs`, `round` y `pi`. |
 | **Exportar** | **3MF** (Bambu Studio, Orca, Prusa; guarda unidades y piezas separadas), **STL** y **STEP** (Rhino, Fusion, FreeCAD). |
